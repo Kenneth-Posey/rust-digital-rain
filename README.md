@@ -4,6 +4,10 @@ A Matrix-style digital rain animated desktop wallpaper written in Rust. A fallin
 
 ---
 
+![digital rain demonstration](demo.gif)
+
+---
+
 ## Installation
 
 ### 1. Rust
