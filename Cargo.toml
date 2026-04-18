@@ -1,0 +1,15 @@
+[package]
+name = "rust-digital-rain"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+rand = "0.10.1"
+libc = "0.2"
+proctitle = "0.1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
