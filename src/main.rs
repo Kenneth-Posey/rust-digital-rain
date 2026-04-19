@@ -8,6 +8,15 @@ use clap::Parser;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
+fn nonzero_usize(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+    if n == 0 {
+        Err("value must be at least 1".into())
+    } else {
+        Ok(n)
+    }
+}
+
 extern "C" fn handle_signal(_: libc::c_int) {
     RUNNING.store(false, Ordering::SeqCst);
 }
@@ -25,12 +34,12 @@ struct Config {
     speed: f32,
 
     /// Target frame rate in frames per second (default: 24)
-    #[arg(long, default_value_t = 24)]
+    #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u64).range(1..))]
     fps: u64,
 
     /// Maximum trail length in rows; minimum is ~37% of this, chosen randomly
     /// per column (default: 60)
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60, value_parser = nonzero_usize)]
     trail_length: usize,
 
     /// Chance (0–100) per tick that a trail glyph flashes bright (default: 5)
@@ -395,12 +404,11 @@ fn main() -> io::Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    execute!(
+    let r1 = disable_raw_mode();
+    let r2 = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         crossterm::cursor::Show,
-    )?;
-
-    Ok(())
+    );
+    r1.and(r2)
 }
