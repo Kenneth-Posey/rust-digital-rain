@@ -615,3 +615,223 @@ fn format_file_label(path: &std::path::Path) -> String {
     let display = path.display().to_string();
     format!(" {name} — {display} ")
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn test_cfg() -> Config {
+        Config {
+            speed: 1.0,
+            fps: 24,
+            trail_length: 60,
+            flash_chance: 5.0,
+            rotation_speed: 1.0,
+            config: None,
+        }
+    }
+
+    /// Advance the column until `head_y` has crossed at least `target_row` rows.
+    fn tick_to_row(col: &mut Column, cfg: &Config, rng: &mut impl rand::RngExt, target_row: i32) {
+        for _ in 0..10_000 {
+            col.tick(cfg, rng, None);
+            if col.head_y as i32 >= target_row {
+                break;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Column + actor integration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn column_new_with_actor_has_source_line() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        let src_cfg = source::load_config(&cfg_path).expect("config.yml");
+        let handle = source::spawn(src_cfg);
+
+        let mut rng = rand::rng();
+        let cfg = test_cfg();
+        let col = Column::new(0, 40, &cfg, &mut rng, Some(&handle));
+
+        assert!(col.source_chars.is_some(), "source_chars should be populated from actor");
+        assert!(col.source_kw.is_some(), "source_kw should be populated from actor");
+        assert_eq!(col.char_index, 0, "char_index must start at 0");
+        let sc = col.source_chars.as_ref().unwrap();
+        let sk = col.source_kw.as_ref().unwrap();
+        assert!(!sc.is_empty(), "source line must not be empty");
+        assert_eq!(sc.len(), sk.len(), "chars and is_keyword must have equal lengths");
+        assert_eq!(col.trail_rows, sc.len().max(1), "trail_rows should equal source line length");
+    }
+
+    #[test]
+    fn column_restart_resets_char_index_and_fetches_new_line() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        let src_cfg = source::load_config(&cfg_path).expect("config.yml");
+        let handle = source::spawn(src_cfg);
+
+        let mut rng = rand::rng();
+        let cfg = test_cfg();
+        let mut col = Column::new(0, 40, &cfg, &mut rng, Some(&handle));
+
+        // Simulate enough ticks to advance char_index
+        tick_to_row(&mut col, &cfg, &mut rng, 5);
+        let idx_before = col.char_index;
+
+        col.restart(&cfg, &mut rng, Some(&handle));
+
+        assert_eq!(col.char_index, 0, "char_index must be reset to 0 on restart");
+        assert!(idx_before > 0 || col.head_y < 0.0,
+            "char_index should have advanced if head crossed rows");
+        assert!(col.source_chars.is_some(), "restart should fetch a new source line");
+    }
+
+    #[test]
+    fn column_char_index_advances_when_head_crosses_rows() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        let src_cfg = source::load_config(&cfg_path).expect("config.yml");
+        let handle = source::spawn(src_cfg);
+
+        let mut rng = rand::rng();
+        let cfg = test_cfg();
+        let mut col = Column::new(0, 40, &cfg, &mut rng, Some(&handle));
+
+        // Force head to start just above row 0 so we control exactly when it crosses
+        col.head_y = -0.1;
+        col.speed = 2.0; // Will cross at least rows 0 and 1 in one tick
+
+        let idx_before = col.char_index;
+        col.tick(&cfg, &mut rng, Some(&handle));
+        let idx_after = col.char_index;
+
+        assert!(
+            idx_after > idx_before,
+            "char_index ({idx_after}) should have advanced past {idx_before} after head crossed rows"
+        );
+    }
+
+    #[test]
+    fn column_space_in_source_chars_does_not_place_cell() {
+        // Build a column whose first source char is a space
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        let src_cfg = source::load_config(&cfg_path).expect("config.yml");
+
+        // Keep requesting lines until we get one starting with a space
+        let handle = source::spawn(src_cfg);
+        let mut line_with_leading_space = None;
+        for _ in 0..500 {
+            if let Some(l) = handle.next_line() {
+                if l.chars.first() == Some(&' ') {
+                    line_with_leading_space = Some(l);
+                    break;
+                }
+            }
+        }
+        let Some(line) = line_with_leading_space else {
+            // Not every file has a leading-space line; skip gracefully
+            return;
+        };
+
+        let mut rng = rand::rng();
+        let cfg = test_cfg();
+        let mut col = Column::new(0, 40, &cfg, &mut rng, None);
+
+        // Inject the space-leading source line directly into the column
+        col.source_chars = Some(line.chars);
+        col.source_kw = Some(line.is_keyword);
+        col.char_index = 0;
+        col.head_y = -0.1;
+        col.speed = 1.5; // Crosses exactly row 0
+
+        col.tick(&cfg, &mut rng, None);
+
+        // Row 0 should have no cell (space was consumed without placing)
+        assert!(
+            col.cells[0].is_none(),
+            "a space source char must not place a visible cell at row 0"
+        );
+        // char_index should have advanced past the space
+        assert!(col.char_index >= 1, "char_index must advance even when space is skipped");
+    }
+
+    #[test]
+    fn column_without_actor_uses_random_mode() {
+        let mut rng = rand::rng();
+        let cfg = test_cfg();
+        let col = Column::new(0, 40, &cfg, &mut rng, None);
+
+        assert!(col.source_chars.is_none(), "no actor → source_chars must be None");
+        assert!(col.source_kw.is_none(), "no actor → source_kw must be None");
+        assert!(!col.show_file_path, "no actor → show_file_path must be false");
+        assert!(!col.highlight_keywords, "no actor → highlight_keywords must be false");
+        // trail_rows must be in the valid random range
+        let trail_min = ((cfg.trail_length as f32 * 0.37) as usize).max(1);
+        assert!(
+            col.trail_rows >= trail_min && col.trail_rows <= cfg.trail_length,
+            "random trail_rows {} out of range {}..={}",
+            col.trail_rows, trail_min, cfg.trail_length
+        );
+    }
+
+    #[test]
+    fn column_cells_have_target_ch_from_source_line() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        let src_cfg = source::load_config(&cfg_path).expect("config.yml");
+        let handle = source::spawn(src_cfg);
+
+        let mut rng = rand::rng();
+        let cfg = test_cfg();
+        let mut col = Column::new(0, 40, &cfg, &mut rng, Some(&handle));
+
+        // Force deterministic head start + high speed to cross many rows quickly
+        col.head_y = -0.1;
+        col.speed = 3.0;
+
+        col.tick(&cfg, &mut rng, Some(&handle));
+
+        // Find a non-space cell and verify its target_ch came from source_chars
+        let source = col.source_chars.clone().unwrap_or_default();
+        let mut found_target = false;
+        for (row, cell_opt) in col.cells.iter().enumerate() {
+            if let Some(cell) = cell_opt {
+                if let Some(tc) = cell.target_ch {
+                    // target_ch must either be in the source line or be from the post-line random zone
+                    if row < source.len() {
+                        assert!(
+                            source.contains(&tc) || tc == ' ',
+                            "target_ch {tc:?} at row {row} not found in source line"
+                        );
+                    }
+                    found_target = true;
+                }
+            }
+        }
+        assert!(found_target, "at least one cell should have a target_ch set");
+    }
+}

@@ -555,4 +555,124 @@ mod tests {
         let lines: Vec<_> = (0..200).filter_map(|_| handle.next_line()).collect();
         assert!(!lines.is_empty(), "should get continuous lines over 200 requests");
     }
+
+    // --- secret config merge ---
+
+    fn write_temp_config(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn secret_config_extensions_are_union_merged() {
+        let tmp = std::env::temp_dir().join("rain_test_ext");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write_temp_config(&tmp, "config.yml", "extensions: [rs]\npaths: []\nkeywords: {}");
+        write_temp_config(&tmp, "config.secret.yml", "extensions: [py]\npaths: []\nkeywords: {}");
+
+        let cfg = load_config(&tmp.join("config.yml")).unwrap();
+        assert!(cfg.extensions.contains(&"rs".to_string()), "must keep main extension");
+        assert!(cfg.extensions.contains(&"py".to_string()), "must add secret extension");
+        assert_eq!(cfg.extensions.len(), 2, "no extra extensions");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn secret_config_duplicate_extensions_not_added_twice() {
+        let tmp = std::env::temp_dir().join("rain_test_dedup");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write_temp_config(&tmp, "config.yml", "extensions: [rs, py]\npaths: []\nkeywords: {}");
+        write_temp_config(&tmp, "config.secret.yml", "extensions: [rs]\npaths: []\nkeywords: {}");
+
+        let cfg = load_config(&tmp.join("config.yml")).unwrap();
+        let rs_count = cfg.extensions.iter().filter(|e| e.as_str() == "rs").count();
+        assert_eq!(rs_count, 1, "'rs' must not be duplicated after merge");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn secret_config_paths_appended() {
+        let tmp = std::env::temp_dir().join("rain_test_paths");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write_temp_config(&tmp, "config.yml",
+            "extensions: []\npaths:\n  - path: /path/a\nkeywords: {}"
+        );
+        write_temp_config(&tmp, "config.secret.yml",
+            "extensions: []\npaths:\n  - path: /path/b\nkeywords: {}"
+        );
+
+        let cfg = load_config(&tmp.join("config.yml")).unwrap();
+        let paths: Vec<_> = cfg.paths.iter().map(|p| p.path.to_str().unwrap()).collect();
+        assert!(paths.iter().any(|p| p.ends_with("path/a")), "main path /path/a must be present");
+        assert!(paths.iter().any(|p| p.ends_with("path/b")), "secret path /path/b must be present");
+        assert_eq!(cfg.paths.len(), 2);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn secret_config_keywords_merged_per_language() {
+        let tmp = std::env::temp_dir().join("rain_test_kw");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write_temp_config(&tmp, "config.yml",
+            "extensions: []\npaths: []\nkeywords:\n  rust:\n    - fn\n    - let"
+        );
+        write_temp_config(&tmp, "config.secret.yml",
+            "extensions: []\npaths: []\nkeywords:\n  rust:\n    - pub\n  python:\n    - def"
+        );
+
+        let cfg = load_config(&tmp.join("config.yml")).unwrap();
+        let rust_kw = cfg.keywords.get("rust").expect("rust keywords must exist");
+        assert!(rust_kw.contains(&"fn".to_string()), "must keep 'fn' from main");
+        assert!(rust_kw.contains(&"let".to_string()), "must keep 'let' from main");
+        assert!(rust_kw.contains(&"pub".to_string()), "must merge 'pub' from secret");
+        let python_kw = cfg.keywords.get("python").expect("python keywords added from secret");
+        assert!(python_kw.contains(&"def".to_string()), "must add new language from secret");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn secret_config_relative_paths_resolved_from_main_config_dir() {
+        let tmp = std::env::temp_dir().join("rain_test_relpath");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write_temp_config(&tmp, "config.yml",
+            "extensions: [rs]\npaths:\n  - path: ./src\nkeywords: {}"
+        );
+
+        let cfg = load_config(&tmp.join("config.yml")).unwrap();
+        let resolved = &cfg.paths[0].path;
+        assert!(resolved.is_absolute(), "relative path must be resolved to absolute");
+        assert!(
+            resolved.ends_with("src"),
+            "resolved path must end with 'src', got: {resolved:?}"
+        );
+        assert_eq!(
+            resolved.parent().unwrap(),
+            tmp,
+            "resolved path must be anchored to config file directory"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn secret_config_missing_is_silently_ignored() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest_dir.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        // The real config.yml has no secret beside it in CI — should load fine
+        let result = load_config(&cfg_path);
+        assert!(result.is_ok(), "load_config must succeed when no secret file exists");
+    }
 }
