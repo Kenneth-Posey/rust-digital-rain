@@ -18,8 +18,6 @@ use crate::GLYPHS;
 pub struct PathEntry {
     pub path: PathBuf,
     #[serde(default)]
-    pub show_file_path: bool,
-    #[serde(default)]
     pub highlight_keywords: bool,
 }
 
@@ -70,8 +68,6 @@ fn ext_to_language(ext: &str) -> Option<&'static str> {
 pub struct SourceLine {
     pub chars: Vec<char>,
     pub is_keyword: Vec<bool>,
-    pub file: Arc<PathBuf>,
-    pub show_file_path: bool,
     pub highlight_keywords: bool,
 }
 
@@ -173,8 +169,6 @@ fn process_file(
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let language = ext_to_language(ext);
 
-    let file = Arc::new(path.to_path_buf());
-
     text.lines()
         .filter_map(|raw| {
             let (chars, is_keyword) = preprocess_line(
@@ -187,8 +181,6 @@ fn process_file(
             Some(SourceLine {
                 chars,
                 is_keyword,
-                file: Arc::clone(&file),
-                show_file_path: entry.show_file_path,
                 highlight_keywords: entry.highlight_keywords,
             })
         })

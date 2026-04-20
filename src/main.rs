@@ -1,10 +1,7 @@
 use std::{
     io,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -143,8 +140,6 @@ struct Column {
     source_chars: Option<Vec<char>>,
     source_kw: Option<Vec<bool>>,
     char_index: usize,
-    source_file: Option<Arc<PathBuf>>,
-    show_file_path: bool,
     highlight_keywords: bool,
 }
 
@@ -159,7 +154,7 @@ impl Column {
         let speed = (rng.random_range(3..=8) as f32 * 0.02 + 0.04) * cfg.speed;
         let head_y = -(rng.random_range(0..height) as f32);
 
-        let (trail_rows, source_chars, source_kw, source_file, show_file_path, highlight_keywords) =
+        let (trail_rows, source_chars, source_kw, highlight_keywords) =
             Self::apply_line(cfg, rng, Self::pick_line(actor));
 
         Self {
@@ -176,8 +171,6 @@ impl Column {
             source_chars,
             source_kw,
             char_index: 0,
-            source_file,
-            show_file_path,
             highlight_keywords,
         }
     }
@@ -187,21 +180,20 @@ impl Column {
         actor?.next_line()
     }
 
-    /// Unpack a SourceLine (or None) into column fields, computing trail_rows correctly.
     #[allow(clippy::type_complexity)]
     fn apply_line(
         cfg: &Config,
         rng: &mut impl rand::RngExt,
         line: Option<source::SourceLine>,
-    ) -> (usize, Option<Vec<char>>, Option<Vec<bool>>, Option<Arc<PathBuf>>, bool, bool) {
+    ) -> (usize, Option<Vec<char>>, Option<Vec<bool>>, bool) {
         if let Some(l) = line {
             let trail = l.chars.len().max(1);
-            (trail, Some(l.chars), Some(l.is_keyword), Some(l.file), l.show_file_path, l.highlight_keywords)
+            (trail, Some(l.chars), Some(l.is_keyword), l.highlight_keywords)
         } else {
             let trail_min =
                 ((cfg.trail_length as f32 * 0.37) as usize).max(1).min(cfg.trail_length);
             let trail = rng.random_range(trail_min..=cfg.trail_length);
-            (trail, None, None, None, false, false)
+            (trail, None, None, false)
         }
     }
 
@@ -229,10 +221,6 @@ impl Column {
         let slow_max = (fps * 10.0) as u32;
         for row in (prev_row + 1)..=(curr_row) {
             if row >= 0 && row < self.height as i32 {
-                // Skip rows 0-2 when showing the file path overlay at top-right
-                if self.show_file_path && row < 3 {
-                    continue;
-                }
                 let (target_ch, is_keyword) = if let Some(ref sc) = self.source_chars {
                     let ch = sc.get(self.char_index).copied();
                     let kw = self
@@ -366,14 +354,12 @@ impl Column {
         self.fast_threshold = rng.random_range(3..=5);
         self.char_index = 0;
 
-        let (trail_rows, source_chars, source_kw, source_file, show_file_path, highlight_keywords) =
+        let (trail_rows, source_chars, source_kw, highlight_keywords) =
             Self::apply_line(cfg, rng, Self::pick_line(actor));
 
         self.trail_rows = trail_rows;
         self.source_chars = source_chars;
         self.source_kw = source_kw;
-        self.source_file = source_file;
-        self.show_file_path = show_file_path;
         self.highlight_keywords = highlight_keywords;
     }
 }
@@ -384,13 +370,10 @@ impl Column {
 
 struct Rain<'a> {
     columns: &'a [Column],
-    /// If non-zero, the first N rows are reserved for the file path overlay
-    safe_rows: u16,
 }
 
 impl<'a> Widget for Rain<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let first_row = self.safe_rows as usize;
         for col in self.columns {
             let cx = area.x + col.x;
             if cx >= area.right() {
@@ -401,9 +384,6 @@ impl<'a> Widget for Rain<'a> {
 
             for (row, cell_opt) in col.cells.iter().enumerate() {
                 let Some(cell) = cell_opt else { continue };
-                if row < first_row {
-                    continue;
-                }
                 let cy = area.y + row as u16;
                 let is_head = head_row == row as i32;
 
@@ -464,7 +444,6 @@ struct App {
     rng: rand::rngs::ThreadRng,
     config: Config,
     line_actor: Option<source::LineActorHandle>,
-    display_file: Option<Arc<PathBuf>>,
 }
 
 impl App {
@@ -479,7 +458,7 @@ impl App {
         let columns = (0..width)
             .map(|x| Column::new(x, height, &config, &mut rng, actor_ref))
             .collect();
-        Self { columns, width, height, rng, config, line_actor, display_file: None }
+        Self { columns, width, height, rng, config, line_actor }
     }
 
     fn resize(&mut self, width: u16, height: u16) {
@@ -501,15 +480,7 @@ impl App {
         let actor_ref = self.line_actor.as_ref();
         for col in &mut self.columns {
             col.tick(cfg, &mut self.rng, actor_ref);
-            // Update display file when a column has show_file_path and a source file
-            if col.show_file_path && let Some(ref f) = col.source_file {
-                self.display_file = Some(Arc::clone(f));
-            }
         }
-    }
-
-    fn show_file_path_active(&self) -> bool {
-        self.columns.iter().any(|c| c.show_file_path)
     }
 }
 
@@ -569,34 +540,9 @@ fn main() -> io::Result<()> {
     let mut last_tick = Instant::now();
 
     while RUNNING.load(Ordering::SeqCst) {
-        let show_overlay = app.show_file_path_active() && app.display_file.is_some();
-        let safe_rows = if show_overlay { 3 } else { 0 };
-        let display_file = app.display_file.clone();
-
         terminal.draw(|frame| {
             let area = frame.area();
-            frame.render_widget(Rain { columns: &app.columns, safe_rows }, area);
-
-            // File path overlay — top-right, first row
-            if show_overlay && let Some(ref fpath) = display_file {
-                let label = format_file_label(fpath);
-                let label_len = label.chars().count() as u16;
-                let row = 2u16;
-                let col_start = area.width.saturating_sub(label_len);
-                // BOLD routes to the separate bold font family configured in launch.sh
-                // (a readable monospace), keeping the Matrix font for everything else.
-                let overlay_style = Style::default()
-                    .fg(Color::Rgb(140, 200, 140))
-                    .bg(Color::Rgb(0, 15, 0))
-                    .add_modifier(Modifier::BOLD);
-                let buf = frame.buffer_mut();
-                for (i, ch) in label.chars().enumerate() {
-                    let x = col_start + i as u16;
-                    if x < area.width {
-                        buf[(x, row)].set_char(ch).set_style(overlay_style);
-                    }
-                }
-            }
+            frame.render_widget(Rain { columns: &app.columns }, area);
         })?;
 
         let timeout = tick_rate
@@ -620,15 +566,6 @@ fn main() -> io::Result<()> {
         crossterm::cursor::Show,
     );
     r1.and(r2)
-}
-
-fn format_file_label(path: &std::path::Path) -> String {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-    let display = path.display().to_string();
-    format!(" {name} — {display} ")
 }
 
 // ---------------------------------------------------------------------------
@@ -799,7 +736,6 @@ mod tests {
 
         assert!(col.source_chars.is_none(), "no actor → source_chars must be None");
         assert!(col.source_kw.is_none(), "no actor → source_kw must be None");
-        assert!(!col.show_file_path, "no actor → show_file_path must be false");
         assert!(!col.highlight_keywords, "no actor → highlight_keywords must be false");
         // trail_rows must be in the valid random range
         let trail_min = ((cfg.trail_length as f32 * 0.37) as usize).max(1);

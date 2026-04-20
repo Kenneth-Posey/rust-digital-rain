@@ -42,8 +42,6 @@ nohup xwinwrap -ni -fdt -un -g "${SCREEN_W}x${SCREEN_H}+0+0" -s -st -sp -b -nf -
     --option 'window.decorations="None"' \
     --option "window.opacity=1.0" \
     --option 'font.normal.family="Matrix Code NFI"' \
-    --option 'font.bold.family="Monospace"' \
-    --option 'font.bold.style="Bold"' \
     --option "font.size=16" \
     --option "window.dimensions.columns=${COLS}" \
     --option "window.dimensions.lines=${LINES}" \
