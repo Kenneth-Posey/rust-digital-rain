@@ -229,8 +229,8 @@ impl Column {
         let slow_max = (fps * 10.0) as u32;
         for row in (prev_row + 1)..=(curr_row) {
             if row >= 0 && row < self.height as i32 {
-                // Skip the last row when showing the file path overlay
-                if self.show_file_path && row == self.height as i32 - 1 {
+                // Skip row 0 when showing the file path overlay at top-right
+                if self.show_file_path && row == 0 {
                     continue;
                 }
                 let (target_ch, is_keyword) = if let Some(ref sc) = self.source_chars {
@@ -384,13 +384,13 @@ impl Column {
 
 struct Rain<'a> {
     columns: &'a [Column],
-    /// If Some, the last row is reserved for the file path overlay and skipped
+    /// If non-zero, the first N rows are reserved for the file path overlay
     safe_rows: u16,
 }
 
 impl<'a> Widget for Rain<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let max_row = area.height.saturating_sub(self.safe_rows);
+        let first_row = self.safe_rows as usize;
         for col in self.columns {
             let cx = area.x + col.x;
             if cx >= area.right() {
@@ -401,7 +401,7 @@ impl<'a> Widget for Rain<'a> {
 
             for (row, cell_opt) in col.cells.iter().enumerate() {
                 let Some(cell) = cell_opt else { continue };
-                if row >= max_row as usize {
+                if row < first_row {
                     continue;
                 }
                 let cy = area.y + row as u16;
@@ -530,8 +530,20 @@ fn main() -> io::Result<()> {
     let config = Config::parse();
     let tick_rate = Duration::from_millis(1000 / config.fps);
 
+    // Resolve config path: explicit --config flag, then exe directory, then cwd
+    let config_path: Option<PathBuf> = config.config.clone()
+        .or_else(|| {
+            std::env::current_exe().ok()
+                .and_then(|p| p.parent().map(|d| d.join("config.yml")))
+                .filter(|p| p.exists())
+        })
+        .or_else(|| {
+            let p = PathBuf::from("config.yml");
+            p.exists().then_some(p)
+        });
+
     // Optionally start the LineActor from a config file
-    let line_actor = config.config.as_deref().and_then(|path| {
+    let line_actor = config_path.as_deref().and_then(|path| {
         match source::load_config(path) {
             Ok(src_cfg) => {
                 let handle = source::spawn(src_cfg);
@@ -565,11 +577,11 @@ fn main() -> io::Result<()> {
             let area = frame.area();
             frame.render_widget(Rain { columns: &app.columns, safe_rows }, area);
 
-            // File path overlay — bottom-right, last row
+            // File path overlay — top-right, first row
             if show_overlay && let Some(ref fpath) = display_file {
                 let label = format_file_label(fpath);
                 let label_len = label.chars().count() as u16;
-                let row = area.height.saturating_sub(1);
+                let row = 0u16;
                 let col_start = area.width.saturating_sub(label_len);
                 let overlay_style = Style::default()
                     .fg(Color::Rgb(140, 200, 140))
