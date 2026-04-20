@@ -24,6 +24,15 @@ fi
 SCREEN_W=${SCREEN_W:-1920}
 SCREEN_H=${SCREEN_H:-1080}
 
+# Character cell dimensions for "Matrix Code NFI" at font.size=16.
+# Derived from: 1920/210 ≈ 9 px/col, 1080/58 ≈ 19 px/line.
+# Update these if you change font family or font size.
+CELL_W=9
+CELL_H=19
+
+COLS=$(( SCREEN_W / CELL_W ))
+LINES=$(( SCREEN_H / CELL_H ))
+
 nohup xwinwrap -ni -fdt -un -g "${SCREEN_W}x${SCREEN_H}+0+0" -s -st -sp -b -nf -- \
   alacritty \
     --embed WID \
@@ -32,6 +41,8 @@ nohup xwinwrap -ni -fdt -un -g "${SCREEN_W}x${SCREEN_H}+0+0" -s -st -sp -b -nf -
     --option "window.opacity=1.0" \
     --option 'font.normal.family="Matrix Code NFI"' \
     --option "font.size=16" \
+    --option "window.dimensions.columns=${COLS}" \
+    --option "window.dimensions.lines=${LINES}" \
     -e "$DIR/target/release/rust-digital-rain" \
         --speed 1.0 \
         --fps 24 \
@@ -41,4 +52,4 @@ nohup xwinwrap -ni -fdt -un -g "${SCREEN_W}x${SCREEN_H}+0+0" -s -st -sp -b -nf -
   > /dev/null 2>&1 &
 
 disown
-echo "digital-rain started (PID $!) at ${SCREEN_W}x${SCREEN_H}"
+echo "digital-rain started (PID $!) at ${SCREEN_W}x${SCREEN_H} → ${COLS}x${LINES} cells"
