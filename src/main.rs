@@ -164,7 +164,7 @@ impl Column {
         let head_y = -(rng.random_range(0..height) as f32);
 
         let (trail_rows, line_length, source_chars, source_kw, highlight_keywords, highlight_numbers) =
-            Self::apply_line(cfg, rng, Self::pick_line(actor));
+            Self::apply_line(cfg, rng, Self::pick_line(actor), height);
 
         Self {
             x,
@@ -196,14 +196,17 @@ impl Column {
         cfg: &Config,
         rng: &mut impl rand::RngExt,
         line: Option<source::SourceLine>,
+        height: u16,
     ) -> (usize, usize, Option<Vec<char>>, Option<Vec<bool>>, bool, bool) {
+        let max_trail = ((height as f32 * 0.7) as usize).max(1);
         if let Some(l) = line {
-            let len = l.chars.len().max(1);
+            let len = l.chars.len().max(1).min(max_trail);
             (len, l.chars.len(), Some(l.chars), Some(l.is_keyword), l.highlight_keywords, l.highlight_numbers)
         } else {
+            let trail_length = cfg.trail_length.min(max_trail);
             let trail_min =
-                ((cfg.trail_length as f32 * 0.37) as usize).max(1).min(cfg.trail_length);
-            let trail = rng.random_range(trail_min..=cfg.trail_length);
+                ((trail_length as f32 * 0.37) as usize).max(1).min(trail_length);
+            let trail = rng.random_range(trail_min..=trail_length);
             (trail, 0, None, None, false, false)
         }
     }
@@ -405,7 +408,7 @@ impl Column {
         self.fast_threshold = rng.random_range(3..=5);
 
         let (trail_rows, line_length, source_chars, source_kw, highlight_keywords, highlight_numbers) =
-            Self::apply_line(cfg, rng, Self::pick_line(actor));
+            Self::apply_line(cfg, rng, Self::pick_line(actor), self.height);
 
         self.trail_rows = trail_rows;
         self.line_length = line_length;
@@ -707,7 +710,12 @@ mod tests {
         assert!(!sc.is_empty(), "source line must not be empty");
         assert!(col.char_index < sc.len(), "char_index must be within source line bounds");
         assert_eq!(sc.len(), sk.len(), "chars and is_keyword must have equal lengths");
-        assert_eq!(col.trail_rows, sc.len().max(1), "trail_rows should equal source line length");
+        let max_trail = ((40_f32 * 0.9) as usize).max(1);
+        assert!(
+            col.trail_rows <= sc.len().max(1) && col.trail_rows <= max_trail,
+            "trail_rows {} should be <= source line length {} and <= max_trail {}",
+            col.trail_rows, sc.len(), max_trail
+        );
     }
 
     #[test]
@@ -827,12 +835,13 @@ mod tests {
         assert!(col.source_kw.is_none(), "no actor → source_kw must be None");
         assert!(!col.highlight_keywords, "no actor → highlight_keywords must be false");
         assert!(!col.highlight_numbers, "no actor → highlight_numbers must be false");
-        // trail_rows must be in the valid random range
-        let trail_min = ((cfg.trail_length as f32 * 0.37) as usize).max(1);
+        // trail_rows must be in the valid random range (capped at 90% of screen height)
+        let max_trail = ((40_f32 * 0.9) as usize).max(1).min(cfg.trail_length);
+        let trail_min = ((max_trail as f32 * 0.37) as usize).max(1);
         assert!(
-            col.trail_rows >= trail_min && col.trail_rows <= cfg.trail_length,
+            col.trail_rows >= trail_min && col.trail_rows <= max_trail,
             "random trail_rows {} out of range {}..={}",
-            col.trail_rows, trail_min, cfg.trail_length
+            col.trail_rows, trail_min, max_trail
         );
     }
 
