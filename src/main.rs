@@ -517,6 +517,13 @@ fn main() -> io::Result<()> {
     let line_actor = config_path.as_deref().and_then(|path| {
         match source::load_config(path) {
             Ok(src_cfg) => {
+                for entry in &src_cfg.paths {
+                    if entry.path.is_dir() {
+                        eprintln!("[config] {}", entry.path.display());
+                    } else {
+                        eprintln!("[config] not found: {}", entry.path.display());
+                    }
+                }
                 let handle = source::spawn(src_cfg);
                 Some(handle)
             }

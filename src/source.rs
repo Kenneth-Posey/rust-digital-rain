@@ -14,6 +14,29 @@ use crate::GLYPHS;
 // Config structs
 // ---------------------------------------------------------------------------
 
+fn parse_comma_separated(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Deserializes a YAML map whose values are comma-delimited strings into
+/// a `HashMap<String, Vec<String>>`.  Accepts null/missing values gracefully.
+fn deserialize_comma_map<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<HashMap<String, String>> = Option::deserialize(deserializer)?;
+    Ok(raw
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v)| (k, parse_comma_separated(&v)))
+        .collect())
+}
+
 #[derive(Deserialize, Clone)]
 pub struct PathEntry {
     pub path: PathBuf,
@@ -27,8 +50,13 @@ pub struct SourceConfig {
     pub extensions: Vec<String>,
     #[serde(default)]
     pub paths: Vec<PathEntry>,
-    #[serde(default)]
+    /// Keywords per language (comma-delimited string in YAML)
+    #[serde(default, deserialize_with = "deserialize_comma_map")]
     pub keywords: HashMap<String, Vec<String>>,
+    /// Doc-comment line prefixes per language (comma-delimited string in YAML).
+    /// Lines whose trimmed content starts with any of these prefixes are skipped.
+    #[serde(default, deserialize_with = "deserialize_comma_map")]
+    pub doc_comments: HashMap<String, Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,9 +117,14 @@ fn preprocess_line(
     language: Option<&str>,
     keywords: &HashMap<String, HashSet<String>>,
     highlight_keywords: bool,
+    doc_prefixes: &[String],
     glyph_set: &HashSet<char>,
 ) -> Option<(Vec<char>, Vec<bool>)> {
     let trimmed = raw.trim();
+    // Skip lines that are purely documentation
+    if doc_prefixes.iter().any(|p| trimmed.starts_with(p.as_str())) {
+        return None;
+    }
     if trimmed.len() < MIN_LINE_LEN {
         return None;
     }
@@ -160,6 +193,7 @@ fn process_file(
     path: &Path,
     entry: &PathEntry,
     keywords: &HashMap<String, HashSet<String>>,
+    doc_comments: &HashMap<String, Vec<String>>,
     glyph_set: &HashSet<char>,
 ) -> Vec<SourceLine> {
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -168,6 +202,11 @@ fn process_file(
 
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let language = ext_to_language(ext);
+    let empty: Vec<String> = vec![];
+    let doc_prefixes: &[String] = language
+        .and_then(|l| doc_comments.get(l))
+        .map(Vec::as_slice)
+        .unwrap_or(&empty);
 
     text.lines()
         .filter_map(|raw| {
@@ -176,6 +215,7 @@ fn process_file(
                 language,
                 keywords,
                 entry.highlight_keywords,
+                doc_prefixes,
                 glyph_set,
             )?;
             Some(SourceLine {
@@ -217,6 +257,15 @@ pub fn load_config(config_path: &Path) -> Result<SourceConfig, String> {
                     // Merge keywords per-language (union)
                     for (lang, kws) in s.keywords {
                         cfg.keywords.entry(lang).or_default().extend(kws);
+                    }
+                    // Merge doc_comments per-language (union, no duplicates)
+                    for (lang, prefixes) in s.doc_comments {
+                        let existing = cfg.doc_comments.entry(lang).or_default();
+                        for p in prefixes {
+                            if !existing.contains(&p) {
+                                existing.push(p);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -272,6 +321,7 @@ struct LineActor {
     file_cursor: usize,
     line_buffer: VecDeque<SourceLine>,
     keywords: Arc<HashMap<String, HashSet<String>>>,
+    doc_comments: HashMap<String, Vec<String>>,
     glyph_set: HashSet<char>,
 }
 
@@ -322,6 +372,7 @@ impl LineActor {
             file_cursor: 0,
             line_buffer: VecDeque::new(),
             keywords: Arc::new(keywords),
+            doc_comments: config.doc_comments,
             glyph_set: build_glyph_set(),
         }
     }
@@ -335,7 +386,7 @@ impl LineActor {
             let idx = self.file_cursor % self.files.len();
             self.file_cursor += 1;
             let (path, entry) = &self.files[idx];
-            let lines = process_file(path, entry, &self.keywords, &self.glyph_set);
+            let lines = process_file(path, entry, &self.keywords, &self.doc_comments, &self.glyph_set);
             if !lines.is_empty() {
                 self.line_buffer.extend(lines);
                 return true;
@@ -400,15 +451,15 @@ mod tests {
     #[test]
     fn preprocess_rejects_short_lines() {
         let gs = glyph_set();
-        assert!(preprocess_line("fn f()", None, &no_kw(), false, &gs).is_none());
-        assert!(preprocess_line("", None, &no_kw(), false, &gs).is_none());
-        assert!(preprocess_line("       ", None, &no_kw(), false, &gs).is_none());
+        assert!(preprocess_line("fn f()", None, &no_kw(), false, &[], &gs).is_none());
+        assert!(preprocess_line("", None, &no_kw(), false, &[], &gs).is_none());
+        assert!(preprocess_line("       ", None, &no_kw(), false, &[], &gs).is_none());
     }
 
     #[test]
     fn preprocess_lowercases_and_keeps_valid_glyphs() {
         let gs = glyph_set();
-        let (chars, _) = preprocess_line("pub fn main() {", None, &no_kw(), false, &gs)
+        let (chars, _) = preprocess_line("pub fn main() {", None, &no_kw(), false, &[], &gs)
             .expect("should produce output");
         // All chars must be lowercase or valid symbols
         for ch in &chars {
@@ -424,7 +475,7 @@ mod tests {
     #[test]
     fn preprocess_compresses_whitespace() {
         let gs = glyph_set();
-        let (chars, _) = preprocess_line("    let   x  =  1;", None, &no_kw(), false, &gs)
+        let (chars, _) = preprocess_line("    let   x  =  1;", None, &no_kw(), false, &[], &gs)
             .expect("should produce output");
         // Multiple spaces should be collapsed to one
         let s: String = chars.iter().collect();
@@ -439,7 +490,7 @@ mod tests {
             "rust".to_string(),
             ["fn", "pub", "let"].iter().map(|s| s.to_string()).collect(),
         );
-        let (chars, is_kw) = preprocess_line("pub fn hello_world(x: i32) {", Some("rust"), &kw_map, true, &gs)
+        let (chars, is_kw) = preprocess_line("pub fn hello_world(x: i32) {", Some("rust"), &kw_map, true, &[], &gs)
             .expect("should produce output");
         let s: String = chars.iter().collect();
         // Find 'p' 'u' 'b' in chars and verify they are marked as keyword
@@ -461,13 +512,26 @@ mod tests {
             "rust".to_string(),
             ["pub"].iter().map(|s| s.to_string()).collect(),
         );
-        let (chars, is_kw) = preprocess_line("public static void main_func(x)", Some("rust"), &kw_map, true, &gs)
+        let (chars, is_kw) = preprocess_line("public static void main_func(x)", Some("rust"), &kw_map, true, &[], &gs)
             .expect("should produce output");
         let s: String = chars.iter().collect();
         // "pub" at start of "public" must NOT be flagged
         if let Some(pos) = s.find("public") {
             assert!(!is_kw[pos], "'pub' inside 'public' must not be a keyword hit");
         }
+    }
+
+    #[test]
+    fn preprocess_skips_doc_comment_lines() {
+        let gs = glyph_set();
+        let prefixes: Vec<String> = vec!["///".into(), "//!".into()];
+        // Pure doc-comment line must be rejected
+        assert!(preprocess_line("/// This is a doc comment for a function", None, &no_kw(), false, &prefixes, &gs).is_none());
+        assert!(preprocess_line("//! Module-level doc comment here", None, &no_kw(), false, &prefixes, &gs).is_none());
+        // Indented doc comment still starts with the prefix after trim
+        assert!(preprocess_line("    /// indented doc comment line here", None, &no_kw(), false, &prefixes, &gs).is_none());
+        // Regular code line must pass through
+        assert!(preprocess_line("pub fn main() -> Result<()> {", None, &no_kw(), false, &prefixes, &gs).is_some());
     }
 
     // --- load_config ---
@@ -614,10 +678,10 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         write_temp_config(&tmp, "config.yml",
-            "extensions: []\npaths: []\nkeywords:\n  rust:\n    - fn\n    - let"
+            "extensions: []\npaths: []\nkeywords:\n  rust: \"fn, let\""
         );
         write_temp_config(&tmp, "config.secret.yml",
-            "extensions: []\npaths: []\nkeywords:\n  rust:\n    - pub\n  python:\n    - def"
+            "extensions: []\npaths: []\nkeywords:\n  rust: \"pub\"\n  python: \"def\""
         );
 
         let cfg = load_config(&tmp.join("config.yml")).unwrap();

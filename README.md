@@ -52,7 +52,7 @@ cd rust-digital-rain
 cargo build --release
 ```
 
-### 6. Run as a background wallpaper
+## Run as a background wallpaper
 
 ```bash
 bash launch.sh
@@ -60,7 +60,13 @@ bash launch.sh
 
 The script builds the binary (if not already built), then launches xwinwrap with alacritty embedded as a borderless, non-interactive desktop background window. The process will appear as `digital-rain` in your process explorer.
 
-### Tuning the animation
+## Stop the wallpaper
+
+```bash
+bash stop.sh
+```
+
+## Tuning the animation
 
 `launch.sh` passes all animation parameters as explicit CLI flags — edit the values there to adjust the defaults:
 
@@ -71,14 +77,7 @@ The script builds the binary (if not already built), then launches xwinwrap with
 | `--trail-length` | `60` | Maximum trail length in rows |
 | `--flash-chance` | `5` | Chance (0–100) per tick a glyph flashes bright |
 | `--rotation-speed` | `1.0` | Glyph rotation speed multiplier |
-
-You can also pass flags directly when running the binary: `./target/release/rust-digital-rain --speed 0.5 --fps 30`
-
-To stop it:
-
-```bash
-bash stop.sh
-```
+| `--config` | config.yml | Configuration file path 
 
 ---
 
@@ -86,15 +85,7 @@ bash stop.sh
 
 Instead of random glyphs, the rain can display real lines of source code read from your own projects. Each column is assigned one line from a source file; characters spin randomly as the head falls, then snap to the correct character once they settle. Keyword characters (e.g. `fn`, `class`, `return`) are highlighted in brighter green when keyword highlighting is enabled.
 
-### Quick start
-
-```bash
-./target/release/rust-digital-rain --config config.yml
-```
-
-The included `config.yml` scans `./src` of this repository by default, with file-path display and keyword highlighting both enabled.
-
-### Config file format
+## Config file format
 
 ```yaml
 # Extensions to include when scanning directories (global)
@@ -123,7 +114,7 @@ keywords:
     # … see config.yml for the full list
 ```
 
-#### Supported languages for keyword highlighting
+### Supported languages for keyword highlighting
 
 Java, Kotlin, C#, Rust, Python, JavaScript, TypeScript, F#, Haskell, Swift, Clojure, PHP, COBOL, Visual Basic / VB.NET, SQL, C++, C, Ruby, Dart, R.
 
@@ -131,15 +122,12 @@ Java, Kotlin, C#, Rust, Python, JavaScript, TypeScript, F#, Haskell, Swift, Cloj
 
 To add directories from private projects without committing them, create a `config.secret.yml` file **in the same directory as `config.yml`**. It uses the exact same format and is automatically merged at startup. It is already listed in `.gitignore`.
 
-**Steps:**
+#### 1. Create the file next to `config.yml`
 
-1. Create the file next to `config.yml`:
-
-   ```bash
-   touch config.secret.yml
+   ```bash touch config.secret.yml
    ```
 
-2. Add your private paths (and optionally extra extensions or keywords):
+#### 2. Add your private paths (and optionally extra extensions or keywords)
 
    ```yaml
    paths:
@@ -151,10 +139,7 @@ To add directories from private projects without committing them, create a `conf
        highlight_keywords: false
    ```
 
-3. Run as normal — your private paths will be included in the file rotation alongside the public ones:
+#### 3. Run as normal — your private paths will be included in the file rotation alongside the public ones
 
-   ```bash
-   ./target/release/rust-digital-rain --config config.yml
+   ```bash launch.sh
    ```
-
-`config.secret.yml` will never be staged or pushed to git.
