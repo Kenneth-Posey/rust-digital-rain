@@ -229,8 +229,8 @@ impl Column {
         let slow_max = (fps * 10.0) as u32;
         for row in (prev_row + 1)..=(curr_row) {
             if row >= 0 && row < self.height as i32 {
-                // Skip row 0 when showing the file path overlay at top-right
-                if self.show_file_path && row == 0 {
+                // Skip rows 0-2 when showing the file path overlay at top-right
+                if self.show_file_path && row < 3 {
                     continue;
                 }
                 let (target_ch, is_keyword) = if let Some(ref sc) = self.source_chars {
@@ -570,7 +570,7 @@ fn main() -> io::Result<()> {
 
     while RUNNING.load(Ordering::SeqCst) {
         let show_overlay = app.show_file_path_active() && app.display_file.is_some();
-        let safe_rows = if show_overlay { 1 } else { 0 };
+        let safe_rows = if show_overlay { 3 } else { 0 };
         let display_file = app.display_file.clone();
 
         terminal.draw(|frame| {
@@ -581,7 +581,7 @@ fn main() -> io::Result<()> {
             if show_overlay && let Some(ref fpath) = display_file {
                 let label = format_file_label(fpath);
                 let label_len = label.chars().count() as u16;
-                let row = 0u16;
+                let row = 2u16;
                 let col_start = area.width.saturating_sub(label_len);
                 let overlay_style = Style::default()
                     .fg(Color::Rgb(140, 200, 140))
@@ -726,9 +726,9 @@ mod tests {
         let cfg = test_cfg();
         let mut col = Column::new(0, 40, &cfg, &mut rng, Some(&handle));
 
-        // Force head to start just above row 0 so we control exactly when it crosses
-        col.head_y = -0.1;
-        col.speed = 2.0; // Will cross at least rows 0 and 1 in one tick
+        // Force head to start just above row 3 (rows 0-2 are reserved for overlay)
+        col.head_y = 2.5;
+        col.speed = 2.0; // Will cross rows 3 and 4 in one tick
 
         let idx_before = col.char_index;
         col.tick(&cfg, &mut rng, Some(&handle));
@@ -821,8 +821,8 @@ mod tests {
         let cfg = test_cfg();
         let mut col = Column::new(0, 40, &cfg, &mut rng, Some(&handle));
 
-        // Force deterministic head start + high speed to cross many rows quickly
-        col.head_y = -0.1;
+        // Force head to start just above row 3 (rows 0-2 reserved for overlay)
+        col.head_y = 2.5;
         col.speed = 3.0;
 
         col.tick(&cfg, &mut rng, Some(&handle));
