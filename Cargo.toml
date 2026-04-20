@@ -10,6 +10,9 @@ rand = "0.10.1"
 libc = "0.2"
 proctitle = "0.1"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.12"
+walkdir = "2"
 
 [profile.release]
 opt-level = 3

@@ -79,3 +79,82 @@ To stop it:
 ```bash
 bash stop.sh
 ```
+
+---
+
+## Source Code Rain
+
+Instead of random glyphs, the rain can display real lines of source code read from your own projects. Each column is assigned one line from a source file; characters spin randomly as the head falls, then snap to the correct character once they settle. Keyword characters (e.g. `fn`, `class`, `return`) are highlighted in brighter green when keyword highlighting is enabled.
+
+### Quick start
+
+```bash
+./target/release/rust-digital-rain --config config.yml
+```
+
+The included `config.yml` scans `./src` of this repository by default, with file-path display and keyword highlighting both enabled.
+
+### Config file format
+
+```yaml
+# Extensions to include when scanning directories (global)
+extensions:
+  - rs
+  - py
+  - ts
+
+# One entry per directory; options are per-path
+paths:
+  - path: /path/to/my/project/src
+    show_file_path: true      # display filename in bottom-right corner
+    highlight_keywords: true  # brighter colour for language keywords
+
+  - path: /path/to/other/project
+    show_file_path: false
+    highlight_keywords: false
+
+# Keyword lists — applied when highlight_keywords is true.
+# Keys are language names (rust, python, javascript, etc.)
+keywords:
+  rust:
+    - fn
+    - pub
+    - async
+    # … see config.yml for the full list
+```
+
+#### Supported languages for keyword highlighting
+
+Java, Kotlin, C#, Rust, Python, JavaScript, TypeScript, F#, Haskell, Swift, Clojure, PHP, COBOL, Visual Basic / VB.NET, SQL, C++, C, Ruby, Dart, R.
+
+### Adding private paths with `config.secret.yml`
+
+To add directories from private projects without committing them, create a `config.secret.yml` file **in the same directory as `config.yml`**. It uses the exact same format and is automatically merged at startup. It is already listed in `.gitignore`.
+
+**Steps:**
+
+1. Create the file next to `config.yml`:
+
+   ```bash
+   touch config.secret.yml
+   ```
+
+2. Add your private paths (and optionally extra extensions or keywords):
+
+   ```yaml
+   paths:
+     - path: /home/you/work/my-private-repo/src
+       show_file_path: true
+       highlight_keywords: true
+     - path: /home/you/personal/side-project
+       show_file_path: true
+       highlight_keywords: false
+   ```
+
+3. Run as normal — your private paths will be included in the file rotation alongside the public ones:
+
+   ```bash
+   ./target/release/rust-digital-rain --config config.yml
+   ```
+
+`config.secret.yml` will never be staged or pushed to git.

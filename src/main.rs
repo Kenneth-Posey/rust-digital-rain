@@ -1,10 +1,16 @@
 use std::{
     io,
-    sync::atomic::{AtomicBool, Ordering},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
 use clap::Parser;
+
+mod source;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -50,6 +56,10 @@ struct Config {
     /// (default: 1.0)
     #[arg(long, default_value_t = 1.0)]
     rotation_speed: f32,
+
+    /// Path to a YAML config file enabling source-code rain mode
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 }
 
 use crossterm::{
@@ -102,6 +112,12 @@ struct Cell {
     /// Flash intensity: 1.0 = head colour, 0.0 = normal trail colour
     flash: f32,
     flash_decay: f32,
+    /// The stable target character for source-code rain columns; None in random mode
+    target_ch: Option<char>,
+    /// True once the cell has snapped to its target_ch
+    settled: bool,
+    /// True if this character falls inside a keyword token
+    is_keyword: bool,
 }
 // ---------------------------------------------------------------------------
 // Column state
@@ -123,14 +139,29 @@ struct Column {
     delay_counter: u32,
     /// Rows behind the head below which rotation slows to 1–3 sec intervals
     fast_threshold: u16,
+    // Source-code rain fields
+    source_chars: Option<Vec<char>>,
+    source_kw: Option<Vec<bool>>,
+    char_index: usize,
+    source_file: Option<Arc<PathBuf>>,
+    show_file_path: bool,
+    highlight_keywords: bool,
 }
 
 impl Column {
-    fn new(x: u16, height: u16, cfg: &Config, rng: &mut impl rand::RngExt) -> Self {
+    fn new(
+        x: u16,
+        height: u16,
+        cfg: &Config,
+        rng: &mut impl rand::RngExt,
+        actor: Option<&source::LineActorHandle>,
+    ) -> Self {
         let speed = (rng.random_range(3..=8) as f32 * 0.02 + 0.04) * cfg.speed;
         let head_y = -(rng.random_range(0..height) as f32);
-        let trail_min = ((cfg.trail_length as f32 * 0.37) as usize).max(1).min(cfg.trail_length);
-        let trail_rows = rng.random_range(trail_min..=cfg.trail_length);
+
+        let (source_chars, source_kw, trail_rows, source_file, show_file_path, highlight_keywords) =
+            Self::pick_line(cfg, actor);
+
         Self {
             x,
             height,
@@ -142,15 +173,51 @@ impl Column {
             delay: rng.random_range(10..60),
             delay_counter: 0,
             fast_threshold: rng.random_range(3..=5),
+            source_chars,
+            source_kw,
+            char_index: 0,
+            source_file,
+            show_file_path,
+            highlight_keywords,
         }
     }
 
-    fn tick(&mut self, cfg: &Config, rng: &mut impl rand::RngExt) {
+    /// Ask the actor for the next line; fall back to random if unavailable.
+    fn pick_line(
+        cfg: &Config,
+        actor: Option<&source::LineActorHandle>,
+    ) -> (Option<Vec<char>>, Option<Vec<bool>>, usize, Option<Arc<PathBuf>>, bool, bool) {
+        if let Some(a) = actor {
+            if let Some(line) = a.next_line() {
+                let trail = line.chars.len().max(1);
+                return (
+                    Some(line.chars),
+                    Some(line.is_keyword),
+                    trail,
+                    Some(line.file),
+                    line.show_file_path,
+                    line.highlight_keywords,
+                );
+            }
+        }
+        // Random mode
+        let _trail_min =
+            ((cfg.trail_length as f32 * 0.37) as usize).max(1).min(cfg.trail_length);
+        // trail_rows computed at call site when rng is available; use default here
+        (None, None, cfg.trail_length, None, false, false)
+    }
+
+    fn tick(
+        &mut self,
+        cfg: &Config,
+        rng: &mut impl rand::RngExt,
+        actor: Option<&source::LineActorHandle>,
+    ) {
         if !self.head_active {
             self.delay_counter += 1;
             self.update_cells(cfg, rng);
             if self.delay_counter >= self.delay && self.cells.iter().all(|c| c.is_none()) {
-                self.restart(cfg, rng);
+                self.restart(cfg, rng, actor);
             }
             return;
         }
@@ -159,24 +226,48 @@ impl Column {
         self.head_y += self.speed;
         let curr_row = self.head_y as i32;
 
-        // Place a new cell at every integer row the head has just crossed
         let fps = cfg.fps as f32;
         let slow_min = (fps * 8.0) as u32;
         let slow_max = (fps * 10.0) as u32;
         for row in (prev_row + 1)..=(curr_row) {
             if row >= 0 && row < self.height as i32 {
-                self.cells[row as usize] = Some(Cell {
-                    ch: random_glyph(rng),
-                    brightness: 1.0,
-                    fade_rate: self.speed / self.trail_rows as f32,
-                    fast_rotate_speed: self.speed * rng.random_range(2..=3) as f32
-                        * cfg.rotation_speed,
-                    slow_rotate_speed: cfg.rotation_speed
-                        / rng.random_range(slow_min..=slow_max) as f32,
-                    accum: 0.0,
-                    flash: 0.0,
-                    flash_decay: 0.0,
-                });
+                // Skip the last row when showing the file path overlay
+                if self.show_file_path && row == self.height as i32 - 1 {
+                    continue;
+                }
+                let (target_ch, is_keyword) = if let Some(ref sc) = self.source_chars {
+                    let ch = sc.get(self.char_index).copied();
+                    let kw = self
+                        .source_kw
+                        .as_ref()
+                        .and_then(|v| v.get(self.char_index).copied())
+                        .unwrap_or(false);
+                    self.char_index += 1;
+                    (ch, kw)
+                } else {
+                    (None, false)
+                };
+
+                // A space target means an empty slot — don't place a visible cell
+                if target_ch == Some(' ') {
+                    // char_index already incremented above
+                } else {
+                    self.cells[row as usize] = Some(Cell {
+                        ch: random_glyph(rng),
+                        brightness: 1.0,
+                        fade_rate: self.speed / self.trail_rows as f32,
+                        fast_rotate_speed: self.speed * rng.random_range(2..=3) as f32
+                            * cfg.rotation_speed,
+                        slow_rotate_speed: cfg.rotation_speed
+                            / rng.random_range(slow_min..=slow_max) as f32,
+                        accum: 0.0,
+                        flash: 0.0,
+                        flash_decay: 0.0,
+                        target_ch,
+                        settled: false,
+                        is_keyword,
+                    });
+                }
             }
         }
 
@@ -191,6 +282,7 @@ impl Column {
     fn update_cells(&mut self, cfg: &Config, rng: &mut impl rand::RngExt) {
         let head_row = self.head_y as i32;
         let mut flash_candidates: Vec<usize> = Vec::new();
+        let highlight_keywords = self.highlight_keywords;
 
         for (row, cell_opt) in self.cells.iter_mut().enumerate() {
             if let Some(cell) = cell_opt.as_mut() {
@@ -205,7 +297,28 @@ impl Column {
                 cell.accum += rot;
                 if cell.accum >= 1.0 {
                     cell.accum -= 1.0;
-                    cell.ch = random_glyph(rng);
+                    if dist >= self.fast_threshold as u16 {
+                        if let Some(tc) = cell.target_ch {
+                            if !cell.settled {
+                                // First time in slow zone: snap to target
+                                cell.ch = if tc == ' ' { tc } else { tc };
+                                cell.settled = true;
+                            } else if highlight_keywords {
+                                // Locked — no drift when keyword highlighting is on
+                            } else {
+                                // Drift: alternate random then snap back
+                                if cell.ch == tc {
+                                    cell.ch = random_glyph(rng);
+                                } else {
+                                    cell.ch = tc;
+                                }
+                            }
+                        } else {
+                            cell.ch = random_glyph(rng);
+                        }
+                    } else {
+                        cell.ch = random_glyph(rng);
+                    }
                 }
 
                 cell.brightness = (cell.brightness - cell.fade_rate).max(0.0);
@@ -240,16 +353,36 @@ impl Column {
         }
     }
 
-    fn restart(&mut self, cfg: &Config, rng: &mut impl rand::RngExt) {
+    fn restart(
+        &mut self,
+        cfg: &Config,
+        rng: &mut impl rand::RngExt,
+        actor: Option<&source::LineActorHandle>,
+    ) {
         self.speed = (rng.random_range(3..=8) as f32 * 0.02 + 0.04) * cfg.speed;
         self.head_y = -(rng.random_range(0..self.height / 2) as f32);
-        let trail_min = ((cfg.trail_length as f32 * 0.37) as usize).max(1).min(cfg.trail_length);
-        self.trail_rows = rng.random_range(trail_min..=cfg.trail_length);
         self.cells.iter_mut().for_each(|c| *c = None);
         self.head_active = true;
         self.delay = rng.random_range(10..60);
         self.delay_counter = 0;
         self.fast_threshold = rng.random_range(3..=5);
+        self.char_index = 0;
+
+        let (source_chars, source_kw, trail_rows, source_file, show_file_path, highlight_keywords) =
+            Self::pick_line(cfg, actor);
+
+        self.source_chars = source_chars;
+        self.source_kw = source_kw;
+        self.trail_rows = if self.source_chars.is_some() {
+            trail_rows
+        } else {
+            let trail_min =
+                ((cfg.trail_length as f32 * 0.37) as usize).max(1).min(cfg.trail_length);
+            rng.random_range(trail_min..=cfg.trail_length)
+        };
+        self.source_file = source_file;
+        self.show_file_path = show_file_path;
+        self.highlight_keywords = highlight_keywords;
     }
 }
 
@@ -259,10 +392,13 @@ impl Column {
 
 struct Rain<'a> {
     columns: &'a [Column],
+    /// If Some, the last row is reserved for the file path overlay and skipped
+    safe_rows: u16,
 }
 
 impl<'a> Widget for Rain<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let max_row = area.height.saturating_sub(self.safe_rows);
         for col in self.columns {
             let cx = area.x + col.x;
             if cx >= area.right() {
@@ -273,7 +409,7 @@ impl<'a> Widget for Rain<'a> {
 
             for (row, cell_opt) in col.cells.iter().enumerate() {
                 let Some(cell) = cell_opt else { continue };
-                if row >= area.height as usize {
+                if row >= max_row as usize {
                     continue;
                 }
                 let cy = area.y + row as u16;
@@ -281,10 +417,24 @@ impl<'a> Widget for Rain<'a> {
 
                 let (base_r, base_g, base_b) = if is_head {
                     (200u8, 255u8, 225u8)
+                } else if col.highlight_keywords && cell.settled && cell.is_keyword && cell.flash == 0.0 {
+                    // Bright keyword colour
+                    let g = (cell.brightness.powf(1.5) * 255.0) as u8;
+                    let g = g.max(18);
+                    (0u8, g, (g as f32 * 0.10) as u8)
                 } else {
                     let g = (cell.brightness.powf(1.5) * 220.0) as u8;
                     let g = g.max(18);
                     (0u8, g, (g as f32 * 0.10) as u8)
+                };
+
+                // Keyword-settled cells get a brighter, more saturated green
+                let base_color = if col.highlight_keywords && cell.settled && cell.is_keyword && !is_head && cell.flash == 0.0 {
+                    let g = (cell.brightness.powf(1.2) * 255.0).min(255.0) as u8;
+                    let g = g.max(60);
+                    Color::Rgb(0, g, (g as f32 * 0.15) as u8)
+                } else {
+                    Color::Rgb(base_r, base_g, base_b)
                 };
 
                 let color = if cell.flash > 0.0 && !is_head {
@@ -295,7 +445,7 @@ impl<'a> Widget for Rain<'a> {
                         (base_b as f32 + (225.0 - base_b as f32) * f) as u8,
                     )
                 } else {
-                    Color::Rgb(base_r, base_g, base_b)
+                    base_color
                 };
 
                 buf[(cx, cy)]
@@ -321,15 +471,23 @@ struct App {
     height: u16,
     rng: rand::rngs::ThreadRng,
     config: Config,
+    line_actor: Option<source::LineActorHandle>,
+    display_file: Option<Arc<PathBuf>>,
 }
 
 impl App {
-    fn new(width: u16, height: u16, config: Config) -> Self {
+    fn new(
+        width: u16,
+        height: u16,
+        config: Config,
+        line_actor: Option<source::LineActorHandle>,
+    ) -> Self {
         let mut rng = rand::rng();
+        let actor_ref = line_actor.as_ref();
         let columns = (0..width)
-            .map(|x| Column::new(x, height, &config, &mut rng))
+            .map(|x| Column::new(x, height, &config, &mut rng, actor_ref))
             .collect();
-        Self { columns, width, height, rng, config }
+        Self { columns, width, height, rng, config, line_actor, display_file: None }
     }
 
     fn resize(&mut self, width: u16, height: u16) {
@@ -340,16 +498,28 @@ impl App {
         self.height = height;
         let cfg = &self.config;
         let rng = &mut self.rng;
+        let actor_ref = self.line_actor.as_ref();
         self.columns = (0..width)
-            .map(|x| Column::new(x, height, cfg, rng))
+            .map(|x| Column::new(x, height, cfg, rng, actor_ref))
             .collect();
     }
 
     fn tick(&mut self) {
         let cfg = &self.config;
+        let actor_ref = self.line_actor.as_ref();
         for col in &mut self.columns {
-            col.tick(cfg, &mut self.rng);
+            col.tick(cfg, &mut self.rng, actor_ref);
+            // Update display file when a column has show_file_path and a source file
+            if col.show_file_path {
+                if let Some(ref f) = col.source_file {
+                    self.display_file = Some(Arc::clone(f));
+                }
+            }
         }
+    }
+
+    fn show_file_path_active(&self) -> bool {
+        self.columns.iter().any(|c| c.show_file_path)
     }
 }
 
@@ -370,6 +540,20 @@ fn main() -> io::Result<()> {
     let config = Config::parse();
     let tick_rate = Duration::from_millis(1000 / config.fps);
 
+    // Optionally start the LineActor from a config file
+    let line_actor = config.config.as_deref().and_then(|path| {
+        match source::load_config(path) {
+            Ok(src_cfg) => {
+                let handle = source::spawn(src_cfg);
+                Some(handle)
+            }
+            Err(e) => {
+                eprintln!("warning: could not load source config: {e} — using random mode");
+                None
+            }
+        }
+    });
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -379,13 +563,37 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let size = terminal.size()?;
-    let mut app = App::new(size.width, size.height, config);
+    let mut app = App::new(size.width, size.height, config, line_actor);
     let mut last_tick = Instant::now();
 
     while RUNNING.load(Ordering::SeqCst) {
+        let show_overlay = app.show_file_path_active() && app.display_file.is_some();
+        let safe_rows = if show_overlay { 1 } else { 0 };
+        let display_file = app.display_file.clone();
+
         terminal.draw(|frame| {
             let area = frame.area();
-            frame.render_widget(Rain { columns: &app.columns }, area);
+            frame.render_widget(Rain { columns: &app.columns, safe_rows }, area);
+
+            // File path overlay — bottom-right, last row
+            if show_overlay {
+                if let Some(ref fpath) = display_file {
+                    let label = format_file_label(fpath);
+                    let label_len = label.chars().count() as u16;
+                    let row = area.height.saturating_sub(1);
+                    let col_start = area.width.saturating_sub(label_len);
+                    let overlay_style = Style::default()
+                        .fg(Color::Rgb(140, 200, 140))
+                        .bg(Color::Rgb(0, 15, 0));
+                    let buf = frame.buffer_mut();
+                    for (i, ch) in label.chars().enumerate() {
+                        let x = col_start + i as u16;
+                        if x < area.width {
+                            buf[(x, row)].set_char(ch).set_style(overlay_style);
+                        }
+                    }
+                }
+            }
         })?;
 
         let timeout = tick_rate
@@ -411,4 +619,13 @@ fn main() -> io::Result<()> {
         crossterm::cursor::Show,
     );
     r1.and(r2)
+}
+
+fn format_file_label(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    let display = path.display().to_string();
+    format!(" {name} — {display} ")
 }
