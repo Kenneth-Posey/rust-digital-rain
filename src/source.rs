@@ -104,29 +104,25 @@ fn preprocess_line(
 
     // Keyword detection on the lowercased, pre-compression string
     let mut kw_mask = vec![false; lower.len()];
-    if highlight_keywords {
-        if let Some(lang) = language {
-            if let Some(kw_set) = keywords.get(lang) {
-                for kw in kw_set {
-                    let mut start = 0;
-                    while let Some(pos) = lower[start..].find(kw.as_str()) {
-                        let abs = start + pos;
-                        let end = abs + kw.len();
-                        // Whole-word check
-                        let before_ok = abs == 0
-                            || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric()
-                                && lower.as_bytes()[abs - 1] != b'_';
-                        let after_ok = end >= lower.len()
-                            || !lower.as_bytes()[end].is_ascii_alphanumeric()
-                                && lower.as_bytes()[end] != b'_';
-                        if before_ok && after_ok {
-                            for b in kw_mask[abs..end].iter_mut() {
-                                *b = true;
-                            }
-                        }
-                        start = abs + 1;
+    if highlight_keywords && let Some(lang) = language && let Some(kw_set) = keywords.get(lang) {
+        for kw in kw_set {
+            let mut start = 0;
+            while let Some(pos) = lower[start..].find(kw.as_str()) {
+                let abs = start + pos;
+                let end = abs + kw.len();
+                // Whole-word check
+                let before_ok = abs == 0
+                    || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric()
+                        && lower.as_bytes()[abs - 1] != b'_';
+                let after_ok = end >= lower.len()
+                    || !lower.as_bytes()[end].is_ascii_alphanumeric()
+                        && lower.as_bytes()[end] != b'_';
+                if before_ok && after_ok {
+                    for b in kw_mask[abs..end].iter_mut() {
+                        *b = true;
                     }
                 }
+                start = abs + 1;
             }
         }
     }
