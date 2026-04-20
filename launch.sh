@@ -3,7 +3,28 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cargo build --release --manifest-path "$DIR/Cargo.toml"
 
-nohup xwinwrap -ni -fdt -un -g 1920x1080+0+0 -s -st -sp -b -nf -- \
+# Detect the primary screen resolution; fall back to 1920x1080
+read -r SCREEN_W SCREEN_H < <(
+  xrandr --current \
+    | awk '/connected primary/ {
+        match($0, /([0-9]+)x([0-9]+)\+[0-9]+\+[0-9]+/, m)
+        if (m[1]) { print m[1], m[2]; exit }
+      }' \
+)
+if [ -z "$SCREEN_W" ] || [ "$SCREEN_W" -eq 0 ] 2>/dev/null; then
+  # No primary display labelled — fall back to first connected screen
+  read -r SCREEN_W SCREEN_H < <(
+    xrandr --current \
+      | awk '/connected/ {
+          match($0, /([0-9]+)x([0-9]+)\+[0-9]+\+[0-9]+/, m)
+          if (m[1]) { print m[1], m[2]; exit }
+        }'
+  )
+fi
+SCREEN_W=${SCREEN_W:-1920}
+SCREEN_H=${SCREEN_H:-1080}
+
+nohup xwinwrap -ni -fdt -un -g "${SCREEN_W}x${SCREEN_H}+0+0" -s -st -sp -b -nf -- \
   alacritty \
     --embed WID \
     --option 'colors.primary.background="#001900"' \
@@ -11,8 +32,6 @@ nohup xwinwrap -ni -fdt -un -g 1920x1080+0+0 -s -st -sp -b -nf -- \
     --option "window.opacity=1.0" \
     --option 'font.normal.family="Matrix Code NFI"' \
     --option "font.size=16" \
-    --option "window.dimensions.columns=210" \
-    --option "window.dimensions.lines=58" \
     -e "$DIR/target/release/rust-digital-rain" \
         --speed 1.0 \
         --fps 24 \
@@ -22,4 +41,4 @@ nohup xwinwrap -ni -fdt -un -g 1920x1080+0+0 -s -st -sp -b -nf -- \
   > /dev/null 2>&1 &
 
 disown
-echo "digital-rain started (PID $!)"
+echo "digital-rain started (PID $!) at ${SCREEN_W}x${SCREEN_H}"
