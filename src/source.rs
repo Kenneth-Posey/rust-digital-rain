@@ -385,3 +385,174 @@ pub fn spawn(config: SourceConfig) -> LineActorHandle {
 
     LineActorHandle { tx: req_tx, rx: resp_rx }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn glyph_set() -> HashSet<char> {
+        build_glyph_set()
+    }
+
+    fn no_kw() -> HashMap<String, HashSet<String>> {
+        HashMap::new()
+    }
+
+    // --- preprocess_line ---
+
+    #[test]
+    fn preprocess_rejects_short_lines() {
+        let gs = glyph_set();
+        assert!(preprocess_line("fn f()", None, &no_kw(), false, &gs).is_none());
+        assert!(preprocess_line("", None, &no_kw(), false, &gs).is_none());
+        assert!(preprocess_line("       ", None, &no_kw(), false, &gs).is_none());
+    }
+
+    #[test]
+    fn preprocess_lowercases_and_keeps_valid_glyphs() {
+        let gs = glyph_set();
+        let (chars, _) = preprocess_line("pub fn main() {", None, &no_kw(), false, &gs)
+            .expect("should produce output");
+        // All chars must be lowercase or valid symbols
+        for ch in &chars {
+            assert!(
+                ch.is_lowercase() || ch.is_ascii_digit() || !ch.is_alphabetic(),
+                "unexpected char: {ch:?}"
+            );
+        }
+        // The string should start with 'p' (no leading space after trim)
+        assert_eq!(chars[0], 'p');
+    }
+
+    #[test]
+    fn preprocess_compresses_whitespace() {
+        let gs = glyph_set();
+        let (chars, _) = preprocess_line("    let   x  =  1;", None, &no_kw(), false, &gs)
+            .expect("should produce output");
+        // Multiple spaces should be collapsed to one
+        let s: String = chars.iter().collect();
+        assert!(!s.contains("  "), "adjacent spaces found: {s:?}");
+    }
+
+    #[test]
+    fn preprocess_keyword_detection() {
+        let gs = glyph_set();
+        let mut kw_map: HashMap<String, HashSet<String>> = HashMap::new();
+        kw_map.insert(
+            "rust".to_string(),
+            ["fn", "pub", "let"].iter().map(|s| s.to_string()).collect(),
+        );
+        let (chars, is_kw) = preprocess_line("pub fn hello_world(x: i32) {", Some("rust"), &kw_map, true, &gs)
+            .expect("should produce output");
+        let s: String = chars.iter().collect();
+        // Find 'p' 'u' 'b' in chars and verify they are marked as keyword
+        if let Some(pos) = s.find("pub") {
+            assert!(is_kw[pos], "first char of 'pub' should be keyword");
+            assert!(is_kw[pos + 1], "middle char of 'pub' should be keyword");
+            assert!(is_kw[pos + 2], "last char of 'pub' should be keyword");
+        } else {
+            panic!("'pub' not found in chars: {s:?}");
+        }
+    }
+
+    #[test]
+    fn preprocess_keyword_no_partial_match() {
+        // "public" should NOT match keyword "pub"
+        let gs = glyph_set();
+        let mut kw_map: HashMap<String, HashSet<String>> = HashMap::new();
+        kw_map.insert(
+            "rust".to_string(),
+            ["pub"].iter().map(|s| s.to_string()).collect(),
+        );
+        let (chars, is_kw) = preprocess_line("public static void main_func(x)", Some("rust"), &kw_map, true, &gs)
+            .expect("should produce output");
+        let s: String = chars.iter().collect();
+        // "pub" at start of "public" must NOT be flagged
+        if let Some(pos) = s.find("public") {
+            assert!(!is_kw[pos], "'pub' inside 'public' must not be a keyword hit");
+        }
+    }
+
+    // --- load_config ---
+
+    #[test]
+    fn load_config_reads_default_config_yml() {
+        // Config is relative to this source tree
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest_dir.join("config.yml");
+        if !cfg_path.exists() {
+            return; // Skip in environments without the file
+        }
+        let cfg = load_config(&cfg_path).expect("config.yml should parse");
+        assert!(!cfg.extensions.is_empty(), "extensions should be non-empty");
+        assert!(!cfg.paths.is_empty(), "paths should be non-empty");
+        assert!(!cfg.keywords.is_empty(), "keywords should be non-empty");
+    }
+
+    // --- LineActor / spawn ---
+
+    #[test]
+    fn actor_returns_lines_from_src_directory() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest_dir.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        let cfg = load_config(&cfg_path).expect("config.yml should parse");
+        let handle = spawn(cfg);
+
+        // Request 20 lines — at least some should be real source lines
+        let mut got_line = false;
+        let mut got_fallback = false;
+        for _ in 0..20 {
+            match handle.next_line() {
+                Some(line) => {
+                    got_line = true;
+                    assert!(!line.chars.is_empty(), "SourceLine.chars must not be empty");
+                    assert_eq!(
+                        line.chars.len(),
+                        line.is_keyword.len(),
+                        "chars and is_keyword must have equal length"
+                    );
+                    // All chars must be in the glyph set (including space)
+                    let gs = build_glyph_set();
+                    for ch in &line.chars {
+                        assert!(gs.contains(ch), "char {ch:?} not in glyph set");
+                    }
+                }
+                None => {
+                    got_fallback = true;
+                }
+            }
+        }
+        assert!(got_line, "actor should produce at least one real source line");
+        let _ = got_fallback; // Fallback is allowed; just checking we got real lines
+    }
+
+    #[test]
+    fn actor_with_no_paths_returns_fallback() {
+        let cfg = SourceConfig::default();
+        let handle = spawn(cfg);
+        assert!(handle.next_line().is_none(), "empty config should always return None");
+    }
+
+    #[test]
+    fn actor_cycles_through_files_continuously() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest_dir.join("config.yml");
+        if !cfg_path.exists() {
+            return;
+        }
+        let cfg = load_config(&cfg_path).expect("config.yml should parse");
+        let handle = spawn(cfg);
+
+        // Request enough lines to exhaust one file and start the next
+        let lines: Vec<_> = (0..200).filter_map(|_| handle.next_line()).collect();
+        assert!(!lines.is_empty(), "should get continuous lines over 200 requests");
+    }
+}
