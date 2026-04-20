@@ -128,7 +128,8 @@ To add directories from private projects without committing them, create a `conf
 
 #### 1. Create the file next to `config.yml`
 
-   ```bash touch config.secret.yml
+   ```bash
+   touch config.secret.yml
    ```
 
 #### 2. Add your private paths (and optionally extra extensions or keywords)
@@ -145,5 +146,6 @@ To add directories from private projects without committing them, create a `conf
 
 #### 3. Run as normal — your private paths will be included in the file rotation alongside the public ones
 
-   ```bash launch.sh
+   ```bash
+   bash launch.sh
    ```
