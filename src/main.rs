@@ -583,9 +583,12 @@ fn main() -> io::Result<()> {
                 let label_len = label.chars().count() as u16;
                 let row = 2u16;
                 let col_start = area.width.saturating_sub(label_len);
+                // BOLD routes to the separate bold font family configured in launch.sh
+                // (a readable monospace), keeping the Matrix font for everything else.
                 let overlay_style = Style::default()
                     .fg(Color::Rgb(140, 200, 140))
-                    .bg(Color::Rgb(0, 15, 0));
+                    .bg(Color::Rgb(0, 15, 0))
+                    .add_modifier(Modifier::BOLD);
                 let buf = frame.buffer_mut();
                 for (i, ch) in label.chars().enumerate() {
                     let x = col_start + i as u16;
