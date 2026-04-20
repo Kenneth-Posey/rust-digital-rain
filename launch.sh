@@ -6,19 +6,21 @@ cargo build --release --manifest-path "$DIR/Cargo.toml"
 # Detect the primary screen resolution; fall back to 1920x1080
 read -r SCREEN_W SCREEN_H < <(
   xrandr --current \
-    | awk '/connected primary/ {
-        match($0, /([0-9]+)x([0-9]+)\+[0-9]+\+[0-9]+/, m)
-        if (m[1]) { print m[1], m[2]; exit }
-      }' \
+    | grep ' connected primary' \
+    | grep -oP '\d+x\d+\+\d+\+\d+' \
+    | head -1 \
+    | cut -d'+' -f1 \
+    | tr 'x' ' '
 )
 if [ -z "$SCREEN_W" ] || [ "$SCREEN_W" -eq 0 ] 2>/dev/null; then
   # No primary display labelled — fall back to first connected screen
   read -r SCREEN_W SCREEN_H < <(
     xrandr --current \
-      | awk '/connected/ {
-          match($0, /([0-9]+)x([0-9]+)\+[0-9]+\+[0-9]+/, m)
-          if (m[1]) { print m[1], m[2]; exit }
-        }'
+      | grep ' connected' \
+      | grep -oP '\d+x\d+\+\d+\+\d+' \
+      | head -1 \
+      | cut -d'+' -f1 \
+      | tr 'x' ' '
   )
 fi
 SCREEN_W=${SCREEN_W:-1920}
