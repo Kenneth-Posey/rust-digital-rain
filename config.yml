@@ -46,6 +46,7 @@ extensions:
 paths:
   - path: ./src
     highlight_keywords: true
+    highlight_numbers: true
 
 # ---------------------------------------------------------------------------
 # Doc-comment line prefixes per language.
@@ -54,7 +55,7 @@ paths:
 # Language keys must match the extension-to-language map in source.rs.
 # ---------------------------------------------------------------------------
 doc_comments:
-  rust:         "///, //!"
+  rust:         "///, //, //!"
   java:         "/**, * , */"
   kotlin:       "/**, * , */"
   javascript:   "/**, * , */"
@@ -72,6 +73,7 @@ doc_comments:
   cpp:          "///, /**, * , */"
   c:            "/**, * , */"
   visualbasic:  "'''"
+  go:           "//"
 
 # ---------------------------------------------------------------------------
 # Keyword lists per language — used when highlight_keywords is true.
@@ -99,3 +101,4 @@ keywords:
   ruby:         "def, end, class, module, do, if, unless, else, elsif, then, case, when, while, until, for, in, begin, rescue, ensure, retry, raise, return, yield, next, break, self, super, nil, true, false, and, or, not, include, extend, require, require_relative, attr_accessor, attr_reader, attr_writer, public, private, protected, lambda, proc"
   dart:         "abstract, as, assert, async, await, break, case, catch, class, const, continue, covariant, default, deferred, do, dynamic, else, enum, export, extends, extension, external, factory, false, final, finally, for, function, get, hide, if, implements, import, in, interface, is, late, library, mixin, new, null, on, operator, part, required, rethrow, return, sealed, set, show, static, super, switch, sync, this, throw, true, try, typedef, var, void, when, with, yield"
   r:            "function, if, else, for, while, repeat, break, next, return, in, library, require, source, TRUE, FALSE, NULL, NA, Inf, NaN, local, stop, warning, message, tryCatch, withCallingHandlers, on.exit"
+  go:           "break, case, chan, const, continue, default, defer, else, fallthrough, for, func, go, goto, if, import, interface, map, package, range, return, select, struct, switch, type, var, nil, true, false, error, any, string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr, byte, rune, float32, float64, complex64, complex128, bool, make, new, len, cap, close, delete, copy, append, panic, recover, print, println"

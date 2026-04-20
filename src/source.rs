@@ -42,6 +42,8 @@ pub struct PathEntry {
     pub path: PathBuf,
     #[serde(default)]
     pub highlight_keywords: bool,
+    #[serde(default)]
+    pub highlight_numbers: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -84,6 +86,7 @@ fn ext_to_language(ext: &str) -> Option<&'static str> {
         "c" | "h" => Some("c"),
         "rb" => Some("ruby"),
         "dart" => Some("dart"),
+        "go" => Some("go"),
         "r" => Some("r"),
         _ => None,
     }
@@ -97,6 +100,7 @@ pub struct SourceLine {
     pub chars: Vec<char>,
     pub is_keyword: Vec<bool>,
     pub highlight_keywords: bool,
+    pub highlight_numbers: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +121,7 @@ fn preprocess_line(
     language: Option<&str>,
     keywords: &HashMap<String, HashSet<String>>,
     highlight_keywords: bool,
+    highlight_numbers: bool,
     doc_prefixes: &[String],
     glyph_set: &HashSet<char>,
 ) -> Option<(Vec<char>, Vec<bool>)> {
@@ -152,6 +157,25 @@ fn preprocess_line(
                     }
                 }
                 start = abs + 1;
+            }
+        }
+    }
+
+    // Number detection: mark all contiguous digit runs
+    if highlight_numbers {
+        let bytes = lower.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                for b in kw_mask[start..i].iter_mut() {
+                    *b = true;
+                }
+            } else {
+                i += 1;
             }
         }
     }
@@ -215,6 +239,7 @@ fn process_file(
                 language,
                 keywords,
                 entry.highlight_keywords,
+                entry.highlight_numbers,
                 doc_prefixes,
                 glyph_set,
             )?;
@@ -222,6 +247,7 @@ fn process_file(
                 chars,
                 is_keyword,
                 highlight_keywords: entry.highlight_keywords,
+                highlight_numbers: entry.highlight_numbers,
             })
         })
         .collect()
@@ -451,15 +477,15 @@ mod tests {
     #[test]
     fn preprocess_rejects_short_lines() {
         let gs = glyph_set();
-        assert!(preprocess_line("fn f()", None, &no_kw(), false, &[], &gs).is_none());
-        assert!(preprocess_line("", None, &no_kw(), false, &[], &gs).is_none());
-        assert!(preprocess_line("       ", None, &no_kw(), false, &[], &gs).is_none());
+        assert!(preprocess_line("fn f()", None, &no_kw(), false, false, &[], &gs).is_none());
+        assert!(preprocess_line("", None, &no_kw(), false, false, &[], &gs).is_none());
+        assert!(preprocess_line("       ", None, &no_kw(), false, false, &[], &gs).is_none());
     }
 
     #[test]
     fn preprocess_lowercases_and_keeps_valid_glyphs() {
         let gs = glyph_set();
-        let (chars, _) = preprocess_line("pub fn main() {", None, &no_kw(), false, &[], &gs)
+        let (chars, _) = preprocess_line("pub fn main() {", None, &no_kw(), false, false, &[], &gs)
             .expect("should produce output");
         // All chars must be lowercase or valid symbols
         for ch in &chars {
@@ -475,7 +501,7 @@ mod tests {
     #[test]
     fn preprocess_compresses_whitespace() {
         let gs = glyph_set();
-        let (chars, _) = preprocess_line("    let   x  =  1;", None, &no_kw(), false, &[], &gs)
+        let (chars, _) = preprocess_line("    let   x  =  1;", None, &no_kw(), false, false, &[], &gs)
             .expect("should produce output");
         // Multiple spaces should be collapsed to one
         let s: String = chars.iter().collect();
@@ -490,7 +516,7 @@ mod tests {
             "rust".to_string(),
             ["fn", "pub", "let"].iter().map(|s| s.to_string()).collect(),
         );
-        let (chars, is_kw) = preprocess_line("pub fn hello_world(x: i32) {", Some("rust"), &kw_map, true, &[], &gs)
+        let (chars, is_kw) = preprocess_line("pub fn hello_world(x: i32) {", Some("rust"), &kw_map, true, false, &[], &gs)
             .expect("should produce output");
         let s: String = chars.iter().collect();
         // Find 'p' 'u' 'b' in chars and verify they are marked as keyword
@@ -512,7 +538,7 @@ mod tests {
             "rust".to_string(),
             ["pub"].iter().map(|s| s.to_string()).collect(),
         );
-        let (chars, is_kw) = preprocess_line("public static void main_func(x)", Some("rust"), &kw_map, true, &[], &gs)
+        let (chars, is_kw) = preprocess_line("public static void main_func(x)", Some("rust"), &kw_map, true, false, &[], &gs)
             .expect("should produce output");
         let s: String = chars.iter().collect();
         // "pub" at start of "public" must NOT be flagged
@@ -526,12 +552,36 @@ mod tests {
         let gs = glyph_set();
         let prefixes: Vec<String> = vec!["///".into(), "//!".into()];
         // Pure doc-comment line must be rejected
-        assert!(preprocess_line("/// This is a doc comment for a function", None, &no_kw(), false, &prefixes, &gs).is_none());
-        assert!(preprocess_line("//! Module-level doc comment here", None, &no_kw(), false, &prefixes, &gs).is_none());
+        assert!(preprocess_line("/// This is a doc comment for a function", None, &no_kw(), false, false, &prefixes, &gs).is_none());
+        assert!(preprocess_line("//! Module-level doc comment here", None, &no_kw(), false, false, &prefixes, &gs).is_none());
         // Indented doc comment still starts with the prefix after trim
-        assert!(preprocess_line("    /// indented doc comment line here", None, &no_kw(), false, &prefixes, &gs).is_none());
+        assert!(preprocess_line("    /// indented doc comment line here", None, &no_kw(), false, false, &prefixes, &gs).is_none());
         // Regular code line must pass through
-        assert!(preprocess_line("pub fn main() -> Result<()> {", None, &no_kw(), false, &prefixes, &gs).is_some());
+        assert!(preprocess_line("pub fn main() -> Result<()> {", None, &no_kw(), false, false, &prefixes, &gs).is_some());
+    }
+
+    #[test]
+    fn preprocess_number_detection() {
+        let gs = glyph_set();
+        // Single digit, multi-digit, digit embedded in identifier
+        let (chars, is_kw) = preprocess_line("let x = 42; // value 1 here", None, &no_kw(), false, true, &[], &gs)
+            .expect("should produce output");
+        let s: String = chars.iter().collect();
+        // "42" digits must be flagged
+        if let Some(pos) = s.find("42") {
+            assert!(is_kw[pos],     "first digit of 42 must be highlighted");
+            assert!(is_kw[pos + 1], "second digit of 42 must be highlighted");
+        } else {
+            panic!("'42' not found in: {s:?}");
+        }
+        // "1" must be flagged
+        if let Some(pos) = s.find('1') {
+            assert!(is_kw[pos], "lone digit '1' must be highlighted");
+        }
+        // Non-digit chars must not be flagged by number detection
+        if let Some(pos) = s.find('x') {
+            assert!(!is_kw[pos], "'x' must not be highlighted as a number");
+        }
     }
 
     // --- load_config ---
@@ -730,5 +780,84 @@ mod tests {
         // The real config.yml has no secret beside it in CI — should load fine
         let result = load_config(&cfg_path);
         assert!(result.is_ok(), "load_config must succeed when no secret file exists");
+    }
+
+    #[test]
+    fn config_loads_doc_comments() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest_dir.join("config.yml");
+        if !cfg_path.exists() { return; }
+        let cfg = load_config(&cfg_path).expect("config.yml should parse");
+        let rust_docs = cfg.doc_comments.get("rust")
+            .expect("rust doc_comments must be present");
+        assert!(rust_docs.iter().any(|p| p == "///"),  "rust must have '///' doc prefix");
+        assert!(rust_docs.iter().any(|p| p == "//!"),  "rust must have '//!' doc prefix");
+    }
+
+    #[test]
+    fn actor_produces_lines_with_keyword_flags() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest_dir.join("config.yml");
+        if !cfg_path.exists() { return; }
+        let cfg = load_config(&cfg_path).expect("config.yml");
+        let handle = spawn(cfg);
+        let mut found = false;
+        for _ in 0..500 {
+            if let Some(line) = handle.next_line() {
+                if line.highlight_keywords && line.is_keyword.iter().any(|&b| b) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "must find at least one line with highlight_keywords=true and a keyword flagged");
+    }
+
+    #[test]
+    fn doc_comment_lines_absent_from_actor_output() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg_path = manifest_dir.join("config.yml");
+        if !cfg_path.exists() { return; }
+        let cfg = load_config(&cfg_path).expect("config.yml");
+        let handle = spawn(cfg);
+        // None of the first 500 lines should be a /// or //! doc line
+        for _ in 0..500 {
+            if let Some(line) = handle.next_line() {
+                let s: String = line.chars.iter().collect();
+                assert!(
+                    !s.starts_with("///") && !s.starts_with("//!"),
+                    "doc comment line leaked into output: {s:?}"
+                );
+            }
+        }
+    }
+    
+    #[test]
+    fn number_flags_reach_source_line() {
+        let gs = glyph_set();
+        // A real-looking source line with numbers
+        let (chars, is_kw) = preprocess_line(
+            "    let slow_min = (fps * 8.0) as u32;",
+            Some("rust"),
+            &no_kw(),
+            false,
+            true,
+            &[],
+            &gs,
+        )
+        .expect("line should produce output");
+        let s: String = chars.iter().collect();
+        // "8" must be flagged
+        let pos8 = s.find('8').expect("'8' must be present");
+        assert!(is_kw[pos8], "'8' must be flagged as a number");
+        // "0" in "8.0" — '.' is not a digit so only "8" and "0" are separate runs
+        // "u32" has "32" flagged
+        if let Some(pos32) = s.find("32") {
+            assert!(is_kw[pos32],     "'3' in '32' must be flagged");
+            assert!(is_kw[pos32 + 1], "'2' in '32' must be flagged");
+        }
+        // letter chars must not be flagged by number detection alone
+        let pos_l = s.find('l').expect("'l' must be present");
+        assert!(!is_kw[pos_l], "'l' must not be flagged");
     }
 }

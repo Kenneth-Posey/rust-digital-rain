@@ -54,5 +54,6 @@ nohup xwinwrap -ni -fdt -un -g "${SCREEN_W}x${SCREEN_H}+0+0" -s -st -sp -b -nf -
         --rotation-speed 1.0 \
   > /dev/null 2>&1 &
 
-disown
+# Print config diagnostics before the TUI hides them.
+"$DIR/target/release/rust-digital-rain" --config "$DIR/config.yml" --check
 echo "digital-rain started (PID $!) at ${SCREEN_W}x${SCREEN_H} → ${COLS}x${LINES} cells"

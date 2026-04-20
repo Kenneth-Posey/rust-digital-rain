@@ -57,6 +57,10 @@ struct Config {
     /// Path to a YAML config file enabling source-code rain mode
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
+
+    /// Load the config, print path diagnostics to stdout, then exit without starting the TUI
+    #[arg(long)]
+    check: bool,
 }
 
 use crossterm::{
@@ -99,14 +103,14 @@ struct Cell {
     ch: char,
     /// 1.0 = freshly placed, 0.0 = fully faded
     brightness: f32,
-    /// Brightness decrease per tick
+    /// Brightness decrease per tick; applied once dist exceeds fade_threshold
     fade_rate: f32,
-    /// Rotation speed while within fast_threshold rows of the head
+    /// Rotation speed while within transition zone of the head
     fast_rotate_speed: f32,
-    /// Rotation speed beyond fast_threshold (changes every 1–3 seconds)
+    /// Rotation speed in the settled zone (every 8–10 seconds)
     slow_rotate_speed: f32,
     accum: f32,
-    /// Flash intensity: 1.0 = head colour, 0.0 = normal trail colour
+    /// Flash intensity: 1.0 = head colour, 0.0 = normal trail colour (random mode only)
     flash: f32,
     flash_decay: f32,
     /// The stable target character for source-code rain columns; None in random mode
@@ -115,6 +119,8 @@ struct Cell {
     settled: bool,
     /// True if this character falls inside a keyword token
     is_keyword: bool,
+    /// Ticks remaining showing a drift (random) glyph; 0 = not drifting
+    drift_ticks: u32,
 }
 // ---------------------------------------------------------------------------
 // Column state
@@ -128,19 +134,22 @@ struct Column {
     speed: f32,
     /// Fixed-position cells indexed by row; characters stay put when placed
     cells: Vec<Option<Cell>>,
-    /// How many rows the trail lasts before fully fading
+    /// Fade length in rows: equals line_length for source mode, random for random mode
     trail_rows: usize,
+    /// Number of characters in the source line (0 in random mode)
+    line_length: usize,
     /// False once the head has exited the bottom of the screen
     head_active: bool,
     delay: u32,
     delay_counter: u32,
-    /// Rows behind the head below which rotation slows to 1–3 sec intervals
+    /// Transition zone size: rows behind head that spin fast, doubling as fast_threshold
     fast_threshold: u16,
     // Source-code rain fields
     source_chars: Option<Vec<char>>,
     source_kw: Option<Vec<bool>>,
     char_index: usize,
     highlight_keywords: bool,
+    highlight_numbers: bool,
 }
 
 impl Column {
@@ -154,7 +163,7 @@ impl Column {
         let speed = (rng.random_range(3..=8) as f32 * 0.02 + 0.04) * cfg.speed;
         let head_y = -(rng.random_range(0..height) as f32);
 
-        let (trail_rows, source_chars, source_kw, highlight_keywords) =
+        let (trail_rows, line_length, source_chars, source_kw, highlight_keywords, highlight_numbers) =
             Self::apply_line(cfg, rng, Self::pick_line(actor));
 
         Self {
@@ -164,14 +173,16 @@ impl Column {
             speed,
             cells: vec![None; height as usize],
             trail_rows,
+            line_length,
             head_active: true,
             delay: rng.random_range(10..60),
             delay_counter: 0,
             fast_threshold: rng.random_range(3..=5),
             source_chars,
             source_kw,
-            char_index: 0,
+            char_index: if line_length > 0 { rng.random_range(0..line_length) } else { 0 },
             highlight_keywords,
+            highlight_numbers,
         }
     }
 
@@ -185,15 +196,15 @@ impl Column {
         cfg: &Config,
         rng: &mut impl rand::RngExt,
         line: Option<source::SourceLine>,
-    ) -> (usize, Option<Vec<char>>, Option<Vec<bool>>, bool) {
+    ) -> (usize, usize, Option<Vec<char>>, Option<Vec<bool>>, bool, bool) {
         if let Some(l) = line {
-            let trail = l.chars.len().max(1);
-            (trail, Some(l.chars), Some(l.is_keyword), l.highlight_keywords)
+            let len = l.chars.len().max(1);
+            (len, l.chars.len(), Some(l.chars), Some(l.is_keyword), l.highlight_keywords, l.highlight_numbers)
         } else {
             let trail_min =
                 ((cfg.trail_length as f32 * 0.37) as usize).max(1).min(cfg.trail_length);
             let trail = rng.random_range(trail_min..=cfg.trail_length);
-            (trail, None, None, false)
+            (trail, 0, None, None, false, false)
         }
     }
 
@@ -204,6 +215,7 @@ impl Column {
         actor: Option<&source::LineActorHandle>,
     ) {
         if !self.head_active {
+            self.head_y += self.speed; // Keep advancing so dist grows and cells fade smoothly
             self.delay_counter += 1;
             self.update_cells(cfg, rng);
             if self.delay_counter >= self.delay && self.cells.iter().all(|c| c.is_none()) {
@@ -222,13 +234,15 @@ impl Column {
         for row in (prev_row + 1)..=(curr_row) {
             if row >= 0 && row < self.height as i32 {
                 let (target_ch, is_keyword) = if let Some(ref sc) = self.source_chars {
-                    let ch = sc.get(self.char_index).copied();
+                    let line_len = self.line_length.max(1);
+                    let pos = self.char_index;
+                    let ch = sc.get(pos).copied();
                     let kw = self
                         .source_kw
                         .as_ref()
-                        .and_then(|v| v.get(self.char_index).copied())
+                        .and_then(|v| v.get(pos).copied())
                         .unwrap_or(false);
-                    self.char_index += 1;
+                    self.char_index = (pos + 1) % line_len;
                     (ch, kw)
                 } else {
                     (None, false)
@@ -252,6 +266,7 @@ impl Column {
                         target_ch,
                         settled: false,
                         is_keyword,
+                        drift_ticks: 0,
                     });
                 }
             }
@@ -268,52 +283,88 @@ impl Column {
     fn update_cells(&mut self, cfg: &Config, rng: &mut impl rand::RngExt) {
         let head_row = self.head_y as i32;
         let mut flash_candidates: Vec<usize> = Vec::new();
-        let highlight_keywords = self.highlight_keywords;
+        let fast_threshold = self.fast_threshold;
+        let is_source_mode = self.source_chars.is_some();
+        let fps = cfg.fps as f32;
+        // Cells past this distance from the head begin fading individually.
+        let fade_threshold = if is_source_mode {
+            self.fast_threshold as usize + self.line_length
+        } else {
+            self.trail_rows
+        };
 
         for (row, cell_opt) in self.cells.iter_mut().enumerate() {
             if let Some(cell) = cell_opt.as_mut() {
+                // Real distance from head (head_y advances even off-screen).
                 let dist = (head_row - row as i32).max(0) as u16;
+
+                // Rotation speed decreases linearly across the transition zone.
                 let rot = if dist == 0 {
                     cell.fast_rotate_speed * 4.0
-                } else if dist < self.fast_threshold {
-                    cell.fast_rotate_speed
+                } else if dist < fast_threshold {
+                    let zone_frac = 1.0 - dist as f32 / fast_threshold as f32;
+                    cell.fast_rotate_speed * zone_frac.max(0.1)
                 } else {
                     cell.slow_rotate_speed
                 };
+
                 cell.accum += rot;
+
+                // Snap to target immediately on first entry into the slow zone.
+                if dist >= fast_threshold {
+                    if let Some(tc) = cell.target_ch {
+                        if !cell.settled {
+                            cell.ch = tc;
+                            cell.settled = true;
+                        }
+                    }
+                }
+
                 if cell.accum >= 1.0 {
                     cell.accum -= 1.0;
-                    if dist >= self.fast_threshold {
+                    if dist >= fast_threshold {
                         if let Some(tc) = cell.target_ch {
-                            if !cell.settled {
-                                // First time in slow zone: snap to target
-                                cell.ch = tc;
-                                cell.settled = true;
-                            } else if highlight_keywords {
-                                // Locked — no drift when keyword highlighting is on
-                            } else {
-                                // Drift: alternate random then snap back
-                                if cell.ch == tc {
-                                    cell.ch = random_glyph(rng);
-                                } else {
-                                    cell.ch = tc;
-                                }
+                            if cell.settled && cell.drift_ticks == 0 {
+                                // Begin a brief drift: show random glyph for a few frames.
+                                cell.ch = random_glyph(rng);
+                                cell.drift_ticks =
+                                    rng.random_range(2..=(fps * 0.25) as u32).max(2);
                             }
+                            // If already drifting, ignore this accumulator fire.
+                            let _ = tc;
                         } else {
+                            // Random mode: continuous random rotation.
                             cell.ch = random_glyph(rng);
                         }
                     } else {
+                        // In transition zone: always show spinning random glyph.
                         cell.ch = random_glyph(rng);
                     }
                 }
 
-                cell.brightness = (cell.brightness - cell.fade_rate).max(0.0);
+                // Drift countdown: revert to target char when timer expires.
+                if cell.drift_ticks > 0 {
+                    cell.drift_ticks -= 1;
+                    if cell.drift_ticks == 0 {
+                        if let Some(tc) = cell.target_ch {
+                            cell.ch = tc;
+                        }
+                    }
+                }
+
+                // Distance-based fading: each cell fades individually once it is
+                // more than (fast_threshold + line_length) rows behind the head.
+                if dist as usize > fade_threshold {
+                    cell.brightness = (cell.brightness - cell.fade_rate).max(0.0);
+                }
 
                 if cell.flash > 0.0 {
                     cell.flash = (cell.flash - cell.flash_decay).max(0.0);
                 }
 
-                if dist > 0
+                // Random brightness flash: only in pure random mode.
+                if !is_source_mode
+                    && dist > 0
                     && dist <= (self.trail_rows / 2) as u16
                     && cell.flash == 0.0
                     && cell.brightness > 0.3
@@ -352,15 +403,17 @@ impl Column {
         self.delay = rng.random_range(10..60);
         self.delay_counter = 0;
         self.fast_threshold = rng.random_range(3..=5);
-        self.char_index = 0;
 
-        let (trail_rows, source_chars, source_kw, highlight_keywords) =
+        let (trail_rows, line_length, source_chars, source_kw, highlight_keywords, highlight_numbers) =
             Self::apply_line(cfg, rng, Self::pick_line(actor));
 
         self.trail_rows = trail_rows;
+        self.line_length = line_length;
         self.source_chars = source_chars;
         self.source_kw = source_kw;
         self.highlight_keywords = highlight_keywords;
+        self.highlight_numbers = highlight_numbers;
+        self.char_index = if line_length > 0 { rng.random_range(0..line_length) } else { 0 };
     }
 }
 
@@ -385,39 +438,53 @@ impl<'a> Widget for Rain<'a> {
             for (row, cell_opt) in col.cells.iter().enumerate() {
                 let Some(cell) = cell_opt else { continue };
                 let cy = area.y + row as u16;
-                let is_head = head_row == row as i32;
+                let render_dist = (head_row - row as i32).max(0) as u16;
+                let is_head = col.head_active && render_dist == 0;
+                let in_transition = col.head_active
+                    && !is_head
+                    && render_dist < col.fast_threshold;
 
-                let (base_r, base_g, base_b) = if is_head {
-                    (200u8, 255u8, 225u8)
-                } else if col.highlight_keywords && cell.settled && cell.is_keyword && cell.flash == 0.0 {
-                    // Bright keyword colour
-                    let g = (cell.brightness.powf(1.5) * 255.0) as u8;
-                    let g = g.max(18);
-                    (0u8, g, (g as f32 * 0.10) as u8)
-                } else {
-                    let g = (cell.brightness.powf(1.5) * 220.0) as u8;
-                    let g = g.max(18);
-                    (0u8, g, (g as f32 * 0.10) as u8)
-                };
-
-                // Keyword-settled cells get a brighter, more saturated green
-                let base_color = if col.highlight_keywords && cell.settled && cell.is_keyword && !is_head && cell.flash == 0.0 {
-                    let g = (cell.brightness.powf(1.2) * 255.0).min(255.0) as u8;
-                    let g = g.max(60);
-                    Color::Rgb(0, g, (g as f32 * 0.15) as u8)
-                } else {
-                    Color::Rgb(base_r, base_g, base_b)
-                };
-
-                let color = if cell.flash > 0.0 && !is_head {
-                    let f = cell.flash;
+                let color = if is_head {
+                    // Bright white-green leader
+                    Color::Rgb(200, 255, 225)
+                } else if in_transition {
+                    // Interpolate from normal trail green toward head brightness
+                    // based on distance: dist=1 → ~80%, dist=threshold-1 → ~20%
+                    let zone_frac =
+                        1.0 - render_dist as f32 / col.fast_threshold as f32;
+                    let g = (zone_frac * 255.0 + (1.0 - zone_frac) * 80.0) as u8;
+                    let r = (zone_frac * 200.0) as u8;
+                    let b = (g as f32 * (0.15 * zone_frac + 0.10 * (1.0 - zone_frac))) as u8;
+                    Color::Rgb(r, g, b)
+                } else if (col.highlight_keywords || col.highlight_numbers) && cell.settled && cell.is_keyword {
+                    // Keywords: same hue as the leading glyph, scaled by brightness
+                    let b = cell.brightness;
                     Color::Rgb(
-                        (base_r as f32 + (200.0 - base_r as f32) * f) as u8,
-                        (base_g as f32 + (255.0 - base_g as f32) * f) as u8,
-                        (base_b as f32 + (225.0 - base_b as f32) * f) as u8,
+                        (200.0 * b) as u8,
+                        (255.0 * b) as u8,
+                        (225.0 * b) as u8,
                     )
                 } else {
-                    base_color
+                    // Normal trail character
+                    let g = (cell.brightness.powf(1.5) * 220.0) as u8;
+                    let g = g.max(18);
+                    Color::Rgb(0, g, (g as f32 * 0.10) as u8)
+                };
+
+                // Random brightness flash only applies to random-mode columns
+                let color = if cell.flash > 0.0 && col.source_chars.is_none() && !is_head {
+                    let f = cell.flash;
+                    let (base_r, base_g, base_b) = match color {
+                        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+                        _ => (0.0, 80.0, 8.0),
+                    };
+                    Color::Rgb(
+                        (base_r + (200.0 - base_r) * f) as u8,
+                        (base_g + (255.0 - base_g) * f) as u8,
+                        (base_b + (225.0 - base_b) * f) as u8,
+                    )
+                } else {
+                    color
                 };
 
                 buf[(cx, cy)]
@@ -519,10 +586,15 @@ fn main() -> io::Result<()> {
             Ok(src_cfg) => {
                 for entry in &src_cfg.paths {
                     if entry.path.is_dir() {
-                        eprintln!("[config] {}", entry.path.display());
+                        let kw = if entry.highlight_keywords { "keywords=on" } else { "keywords=off" };
+                        let num = if entry.highlight_numbers { "numbers=on" } else { "numbers=off" };
+                        println!("[config] {} ({}, {})", entry.path.display(), kw, num);
                     } else {
-                        eprintln!("[config] not found: {}", entry.path.display());
+                        println!("[config] not found: {}", entry.path.display());
                     }
+                }
+                if config.check {
+                    return None;
                 }
                 let handle = source::spawn(src_cfg);
                 Some(handle)
@@ -533,6 +605,10 @@ fn main() -> io::Result<()> {
             }
         }
     });
+
+    if config.check {
+        return Ok(());
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -592,6 +668,7 @@ mod tests {
             flash_chance: 5.0,
             rotation_speed: 1.0,
             config: None,
+            check: false,
         }
     }
 
@@ -625,10 +702,10 @@ mod tests {
 
         assert!(col.source_chars.is_some(), "source_chars should be populated from actor");
         assert!(col.source_kw.is_some(), "source_kw should be populated from actor");
-        assert_eq!(col.char_index, 0, "char_index must start at 0");
         let sc = col.source_chars.as_ref().unwrap();
         let sk = col.source_kw.as_ref().unwrap();
         assert!(!sc.is_empty(), "source line must not be empty");
+        assert!(col.char_index < sc.len(), "char_index must be within source line bounds");
         assert_eq!(sc.len(), sk.len(), "chars and is_keyword must have equal lengths");
         assert_eq!(col.trail_rows, sc.len().max(1), "trail_rows should equal source line length");
     }
@@ -653,9 +730,11 @@ mod tests {
 
         col.restart(&cfg, &mut rng, Some(&handle));
 
-        assert_eq!(col.char_index, 0, "char_index must be reset to 0 on restart");
-        assert!(idx_before > 0 || col.head_y < 0.0,
-            "char_index should have advanced if head crossed rows");
+        let sc_after = col.source_chars.as_ref().expect("restart should fetch a new source line");
+        assert!(
+            sc_after.is_empty() || col.char_index < sc_after.len(),
+            "char_index must be within new source line bounds after restart"
+        );
         assert!(col.source_chars.is_some(), "restart should fetch a new source line");
     }
 
@@ -678,12 +757,15 @@ mod tests {
         col.speed = 2.0; // Will cross rows 3 and 4 in one tick
 
         let idx_before = col.char_index;
+        let line_len = col.line_length.max(1);
         col.tick(&cfg, &mut rng, Some(&handle));
         let idx_after = col.char_index;
 
+        // char_index must have advanced by at least 1, accounting for ring-buffer wrap
+        let advanced = (idx_after + line_len - idx_before) % line_len;
         assert!(
-            idx_after > idx_before,
-            "char_index ({idx_after}) should have advanced past {idx_before} after head crossed rows"
+            advanced >= 1,
+            "char_index must have advanced after head crossed rows (before={idx_before}, after={idx_after}, len={line_len})"
         );
     }
 
@@ -744,6 +826,7 @@ mod tests {
         assert!(col.source_chars.is_none(), "no actor → source_chars must be None");
         assert!(col.source_kw.is_none(), "no actor → source_kw must be None");
         assert!(!col.highlight_keywords, "no actor → highlight_keywords must be false");
+        assert!(!col.highlight_numbers, "no actor → highlight_numbers must be false");
         // trail_rows must be in the valid random range
         let trail_min = ((cfg.trail_length as f32 * 0.37) as usize).max(1);
         assert!(
@@ -791,5 +874,47 @@ mod tests {
             }
         }
         assert!(found_target, "at least one cell should have a target_ch set");
+    }
+
+    #[test]
+    fn number_flag_reaches_placed_cell() {
+        // Build a SourceLine where position 3 is a digit with is_keyword=true
+        let chars: Vec<char> = vec!['l', 'e', 't', 'x', '=', '4', '2', ';'];
+        let mut is_keyword = vec![false; chars.len()];
+        is_keyword[5] = true; // '4'
+        is_keyword[6] = true; // '2'
+
+        let mut rng = rand::rng();
+        let cfg = test_cfg();
+        let mut col = Column::new(0, 40, &cfg, &mut rng, None);
+
+        // Inject the line directly
+        col.line_length = chars.len();
+        col.trail_rows = chars.len();
+        col.source_chars = Some(chars.clone());
+        col.source_kw = Some(is_keyword);
+        col.highlight_numbers = true;
+        col.char_index = 0;
+        col.head_y = -0.5;
+        col.speed = 1.0;
+        col.fast_threshold = 1;
+
+        // Tick enough to place cells at rows 0–7
+        for _ in 0..10 {
+            col.tick(&cfg, &mut rng, None);
+        }
+
+        // Find the cell corresponding to '4' (source position 5) and '2' (position 6)
+        let mut found_kw_cell = false;
+        for cell_opt in &col.cells {
+            if let Some(cell) = cell_opt {
+                if cell.is_keyword {
+                    found_kw_cell = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_kw_cell, "at least one cell must have is_keyword=true when number flag is set");
+        assert!(col.highlight_numbers, "column must carry highlight_numbers=true");
     }
 }

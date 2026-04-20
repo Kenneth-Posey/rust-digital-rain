@@ -77,13 +77,14 @@ bash stop.sh
 | `--trail-length` | `60` | Maximum trail length in rows |
 | `--flash-chance` | `5` | Chance (0–100) per tick a glyph flashes bright |
 | `--rotation-speed` | `1.0` | Glyph rotation speed multiplier |
-| `--config` | config.yml | Configuration file path 
+| `--config` | *(none)* | Path to a YAML config file enabling source-code rain mode |
+| `--check` | — | Load config, print path diagnostics to stdout, then exit |
 
 ---
 
 ## Source Code Rain
 
-Instead of random glyphs, the rain can display real lines of source code read from your own projects. Each column is assigned one line from a source file; characters spin randomly as the head falls, then snap to the correct character once they settle. Keyword characters (e.g. `fn`, `class`, `return`) are highlighted in brighter green when keyword highlighting is enabled.
+Instead of random glyphs, the rain can display real lines of source code read from your own projects. Each column is assigned one line from a source file; characters spin randomly as the head falls, then snap to the correct character once they settle. Keyword characters (e.g. `fn`, `class`, `return`) are highlighted in bright white-green — the same color as the leading glyph — when keyword highlighting is enabled. Digit characters (`0`–`9`) can be highlighted the same way with `highlight_numbers: true`. Documentation comment lines are filtered out and never shown.
 
 ## Config file format
 
@@ -97,26 +98,29 @@ extensions:
 # One entry per directory; options are per-path
 paths:
   - path: /path/to/my/project/src
-    show_file_path: true      # display filename in bottom-right corner
-    highlight_keywords: true  # brighter colour for language keywords
+    highlight_keywords: true  # brighter color for language keywords
+    highlight_numbers: true   # brighter color for digit characters
 
   - path: /path/to/other/project
-    show_file_path: false
-    highlight_keywords: false
+    highlight_keywords: true  
+    highlight_numbers: false
+
+# Doc-comment prefixes per language — matching lines are skipped entirely.
+# Multiple prefixes are comma-separated.
+doc_comments:
+  rust: "///, //, //!"
+  python: "\"\"\", '''"
+  # … see config.yml for the full list
 
 # Keyword lists — applied when highlight_keywords is true.
 # Keys are language names (rust, python, javascript, etc.)
 keywords:
-  rust:
-    - fn
-    - pub
-    - async
-    # … see config.yml for the full list
+  rust: "fn, pub, async" # … see config.yml for the full list
 ```
 
 ### Supported languages for keyword highlighting
 
-Java, Kotlin, C#, Rust, Python, JavaScript, TypeScript, F#, Haskell, Swift, Clojure, PHP, COBOL, Visual Basic / VB.NET, SQL, C++, C, Ruby, Dart, R.
+Java, Kotlin, C#, Rust, Python, JavaScript, TypeScript, F#, Haskell, Swift, Clojure, PHP, COBOL, Visual Basic / VB.NET, SQL, C++, C, Ruby, Dart, R, Go.
 
 ### Adding private paths with `config.secret.yml`
 
@@ -132,10 +136,10 @@ To add directories from private projects without committing them, create a `conf
    ```yaml
    paths:
      - path: /home/you/work/my-private-repo/src
-       show_file_path: true
+       highlight_numbers: true
        highlight_keywords: true
      - path: /home/you/personal/side-project
-       show_file_path: true
+       highlight_numbers: true
        highlight_keywords: false
    ```
 
