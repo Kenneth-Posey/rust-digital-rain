@@ -46,6 +46,7 @@ nohup xwinwrap -ni -fdt -un -g "${SCREEN_W}x${SCREEN_H}+0+0" -s -st -sp -b -nf -
     --option "window.dimensions.columns=${COLS}" \
     --option "window.dimensions.lines=${LINES}" \
     -e "$DIR/target/release/rust-digital-rain" \
+        --config "$DIR/config.yml" \
         --speed 1.0 \
         --fps 24 \
         --trail-length 60 \
