@@ -327,7 +327,7 @@ impl Column {
                     cell.accum -= 1.0;
                     if dist >= fast_threshold {
                         if let Some(tc) = cell.target_ch {
-                            if cell.settled && cell.drift_ticks == 0 {
+                            if cell.settled && cell.drift_ticks == 0 && rng.random_bool(0.5) {
                                 // Begin a brief drift: show random glyph for a few frames.
                                 cell.ch = random_glyph(rng);
                                 cell.drift_ticks =
