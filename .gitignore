@@ -6,3 +6,4 @@ config.secret.yml
 nohup.out
 
 .github
+sync-instructions.sh
