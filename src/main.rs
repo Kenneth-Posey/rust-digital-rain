@@ -148,6 +148,8 @@ struct Column {
     source_chars: Option<Vec<char>>,
     source_kw: Option<Vec<bool>>,
     char_index: usize,
+    /// Total source characters consumed in the current line across all passes.
+    chars_placed: usize,
     highlight_keywords: bool,
     highlight_numbers: bool,
 }
@@ -181,6 +183,7 @@ impl Column {
             source_chars,
             source_kw,
             char_index: if line_length > 0 { rng.random_range(0..line_length) } else { 0 },
+            chars_placed: 0,
             highlight_keywords,
             highlight_numbers,
         }
@@ -236,6 +239,12 @@ impl Column {
         let slow_max = (fps * 10.0) as u32;
         for row in (prev_row + 1)..=(curr_row) {
             if row >= 0 && row < self.height as i32 {
+                // If the line is fully consumed in source mode, the head keeps
+                // moving but no new cells are placed.
+                if self.source_chars.is_some() && self.chars_placed >= self.line_length {
+                    continue;
+                }
+
                 let (target_ch, is_keyword) = if let Some(ref sc) = self.source_chars {
                     let line_len = self.line_length.max(1);
                     let pos = self.char_index;
@@ -246,6 +255,7 @@ impl Column {
                         .and_then(|v| v.get(pos).copied())
                         .unwrap_or(false);
                     self.char_index = (pos + 1) % line_len;
+                    self.chars_placed += 1;
                     (ch, kw)
                 } else {
                     (None, false)
@@ -276,8 +286,16 @@ impl Column {
         }
 
         if self.head_y >= self.height as f32 {
-            self.head_active = false;
-            self.delay_counter = 0;
+            let line_exhausted =
+                self.source_chars.is_none() || self.chars_placed >= self.line_length;
+            if line_exhausted {
+                self.head_active = false;
+                self.delay_counter = 0;
+            } else {
+                // More characters remain: wrap the head back to the top to
+                // continue overwriting cells with the next batch of glyphs.
+                self.head_y = -1.0;
+            }
         }
 
         self.update_cells(cfg, rng);
@@ -288,18 +306,22 @@ impl Column {
         let mut flash_candidates: Vec<usize> = Vec::new();
         let fast_threshold = self.fast_threshold;
         let is_source_mode = self.source_chars.is_some();
+        // Fading is suppressed until the entire source line has been placed.
+        let line_exhausted = !is_source_mode || self.chars_placed >= self.line_length;
         let fps = cfg.fps as f32;
         // Cells past this distance from the head begin fading individually.
-        let fade_threshold = if is_source_mode {
-            self.fast_threshold as usize + self.line_length
-        } else {
-            self.trail_rows
-        };
+        let fade_threshold = self.fast_threshold as usize + self.trail_rows;
 
         for (row, cell_opt) in self.cells.iter_mut().enumerate() {
             if let Some(cell) = cell_opt.as_mut() {
                 // Real distance from head (head_y advances even off-screen).
-                let dist = (head_row - row as i32).max(0) as u16;
+                // Cells below the current head position (multi-pass leftovers)
+                // are treated as settled trail — past the transition zone.
+                let dist: u16 = if head_row >= row as i32 {
+                    (head_row - row as i32) as u16
+                } else {
+                    self.fast_threshold + 1
+                };
 
                 // Rotation speed decreases linearly across the transition zone.
                 let rot = if dist == 0 {
@@ -356,8 +378,9 @@ impl Column {
                 }
 
                 // Distance-based fading: each cell fades individually once it is
-                // more than (fast_threshold + line_length) rows behind the head.
-                if dist as usize > fade_threshold {
+                // more than (fast_threshold + trail_rows) rows behind the head.
+                // Fading is suppressed until the full source line is placed.
+                if line_exhausted && dist as usize > fade_threshold {
                     cell.brightness = (cell.brightness - cell.fade_rate).max(0.0);
                 }
 
@@ -414,6 +437,7 @@ impl Column {
         self.line_length = line_length;
         self.source_chars = source_chars;
         self.source_kw = source_kw;
+        self.chars_placed = 0;
         self.highlight_keywords = highlight_keywords;
         self.highlight_numbers = highlight_numbers;
         self.char_index = if line_length > 0 { rng.random_range(0..line_length) } else { 0 };
@@ -441,7 +465,12 @@ impl<'a> Widget for Rain<'a> {
             for (row, cell_opt) in col.cells.iter().enumerate() {
                 let Some(cell) = cell_opt else { continue };
                 let cy = area.y + row as u16;
-                let render_dist = (head_row - row as i32).max(0) as u16;
+                let render_dist: u16 = if head_row >= row as i32 {
+                    (head_row - row as i32) as u16
+                } else {
+                    // Cell is below/ahead of head (multi-pass wrap): render as settled trail.
+                    col.fast_threshold + 1
+                };
                 let is_head = col.head_active && render_dist == 0;
                 let in_transition = col.head_active
                     && !is_head
@@ -808,8 +837,11 @@ mod tests {
         let mut col = Column::new(0, 40, &cfg, &mut rng, None);
 
         // Inject the space-leading source line directly into the column
+        let line_len = line.chars.len();
         col.source_chars = Some(line.chars);
         col.source_kw = Some(line.is_keyword);
+        col.line_length = line_len;
+        col.chars_placed = 0;
         col.char_index = 0;
         col.head_y = -0.1;
         col.speed = 1.5; // Crosses exactly row 0
