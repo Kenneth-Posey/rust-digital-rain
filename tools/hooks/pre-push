@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Pre-push hook: cleans local Cargo target directories when pushing to main.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+cleanup_targets() {
+    rm -rf "$REPO_ROOT/target"
+}
+
+pushes_main=false
+
+while IFS=' ' read -r _local_ref local_sha _remote_ref remote_sha; do
+    [[ "$local_sha" == "0000000000000000000000000000000000000000" ]] && continue
+
+    if [[ "$_local_ref" == "refs/heads/main" && "$_remote_ref" == "refs/heads/main" ]]; then
+        pushes_main=true
+    fi
+done
+
+if [[ "$pushes_main" == "true" ]]; then
+    echo "==> Push to main detected - cleaning local Cargo target directories..."
+    cleanup_targets
+    echo "==> Cleanup complete."
+fi
